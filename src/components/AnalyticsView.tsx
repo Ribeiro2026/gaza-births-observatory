@@ -39,9 +39,12 @@ interface AnalyticsViewProps {
   reports: BirthReportRecord[];
   revisions: RevisionLogRecord[];
   pendingStagingCount: number;
+  isOwner: boolean;
   loading: boolean;
   onInspectReport: (reportId: number) => void;
-  onNavigateTab: (tab: 'analytics' | 'heatmaps' | 'explorer' | 'ingestion' | 'sources') => void;
+  onNavigateTab: (
+    tab: 'analytics' | 'heatmaps' | 'discrepancies' | 'explorer' | 'ingestion' | 'sources'
+  ) => void;
 }
 
 type ConfidenceScope = 'verified' | 'active' | 'all';
@@ -57,6 +60,7 @@ export function AnalyticsView({
   reports,
   revisions,
   pendingStagingCount,
+  isOwner,
   loading,
   onInspectReport,
   onNavigateTab,
@@ -179,13 +183,18 @@ export function AnalyticsView({
 
     const widestDiscrepancy = [...periodDiscrepancies].sort((a, b) => b.spread - a.spread)[0];
 
+    const verifiedTotal = reports.filter((r) => r.confidenceStatus === 'Verified').length;
+    const verifiedPct = reports.length > 0 ? Math.round((verifiedTotal / reports.length) * 100) : 0;
+
     return {
       latestVerified,
       widestDiscrepancy,
       totalActiveReports: filteredReports.length,
       totalRevisions: revisions.length,
+      verifiedTotal,
+      verifiedPct,
     };
-  }, [filteredReports, periodDiscrepancies, revisions.length]);
+  }, [filteredReports, periodDiscrepancies, reports, revisions.length]);
 
   const toggleSource = (sourceId: number) => {
     setHiddenSourceIds((prev) =>
@@ -688,6 +697,16 @@ export function AnalyticsView({
               'Select 2+ sources to compare'
             )}
           </div>
+          <div className="mt-1">
+            <button
+              type="button"
+              onClick={() => onNavigateTab('discrepancies')}
+              className="inline-flex items-center gap-1 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
+            >
+              Open discrepancy report
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          </div>
         </div>
 
         <div className="p-5 sm:border-t sm:border-[#E2E8F0] lg:border-t-0">
@@ -701,20 +720,44 @@ export function AnalyticsView({
         </div>
 
         <div className="p-5 sm:border-l sm:border-t sm:border-[#E2E8F0] lg:border-l-0 lg:border-t-0">
-          <div className="text-xs font-medium text-[#64748B]">Staging Queue Pending</div>
-          <div className="mt-2 font-mono text-2xl font-semibold tabular-nums text-[#1E3A8A]">
-            {formatNumber(pendingStagingCount)}
-          </div>
-          <div className="mt-1.5">
-            <button
-              type="button"
-              onClick={() => onNavigateTab('ingestion')}
-              className="inline-flex items-center gap-1 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
-            >
-              Review incoming candidates
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          </div>
+          {isOwner ? (
+            <>
+              <div className="text-xs font-medium text-[#64748B]">Staging Queue Pending</div>
+              <div className="mt-2 font-mono text-2xl font-semibold tabular-nums text-[#1E3A8A]">
+                {formatNumber(pendingStagingCount)}
+              </div>
+              <div className="mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab('ingestion')}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
+                >
+                  Review incoming candidates
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-xs font-medium text-[#64748B]">Verified Ledger Coverage</div>
+              <div className="mt-2 font-mono text-2xl font-semibold tabular-nums text-[#1E3A8A]">
+                {formatNumber(metrics.verifiedTotal)}
+                <span className="ml-1.5 text-sm font-normal text-[#64748B]">
+                  ({metrics.verifiedPct}%)
+                </span>
+              </div>
+              <div className="mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => onNavigateTab('sources')}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
+                >
+                  Browse source registry
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </section>
 
@@ -740,13 +783,22 @@ export function AnalyticsView({
                 Periods with two or more concurrent reporting sources
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('explorer')}
-              className="text-xs font-medium text-[#1E3A8A] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Open full ledger
-            </button>
+            <div className="flex items-center gap-4 shrink-0">
+              <button
+                type="button"
+                onClick={() => onNavigateTab('discrepancies')}
+                className="text-xs font-medium text-[#1E3A8A] hover:underline whitespace-nowrap cursor-pointer"
+              >
+                Full discrepancy report
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('explorer')}
+                className="text-xs font-medium text-[#475569] hover:text-[#0F172A] hover:underline whitespace-nowrap cursor-pointer"
+              >
+                Open ledger
+              </button>
+            </div>
           </div>
 
           <div className="overflow-x-auto">

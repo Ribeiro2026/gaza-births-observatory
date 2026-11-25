@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ArrowRight, ExternalLink, LogIn, Plus, Trash2, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { formatNumber, isSafeHttpUrl } from '../lib/utils';
@@ -10,6 +10,7 @@ import type {
 
 interface SourcesDirectoryViewProps {
   sources: SourceRecord[];
+  isOwner: boolean;
   loading: boolean;
   onRefreshAll: () => void;
   onSourceDeleted: (sourceId: number) => void;
@@ -29,12 +30,13 @@ const COLOR_OPTIONS = [
 
 export function SourcesDirectoryView({
   sources,
+  isOwner,
   loading,
   onRefreshAll,
   onSourceDeleted,
   onExploreSource,
 }: SourcesDirectoryViewProps) {
-  const { user, signIn, authFetch } = useAuth();
+  const { signIn, authFetch } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
   const [name, setName] = useState('');
   const [type, setType] = useState<SourceType>('Multilateral Agency');
@@ -51,6 +53,13 @@ export function SourcesDirectoryView({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOwner) {
+      setModalOpen(false);
+      setSourceToDelete(null);
+    }
+  }, [isOwner]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -131,14 +140,16 @@ export function SourcesDirectoryView({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setModalOpen(true)}
-          className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Register Source
-        </button>
+        {isOwner && (
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Register Source
+          </button>
+        )}
       </div>
 
       {statusBanner && (
@@ -244,17 +255,19 @@ export function SourcesDirectoryView({
                       <ArrowRight className="h-3 w-3" />
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDeleteError(null);
-                        setSourceToDelete(src);
-                      }}
-                      className="inline-flex items-center gap-1 font-medium text-[#64748B] transition-colors hover:text-[#B91C1C] whitespace-nowrap cursor-pointer"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      Remove
-                    </button>
+                    {isOwner && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setSourceToDelete(src);
+                        }}
+                        className="inline-flex items-center gap-1 font-medium text-[#64748B] transition-colors hover:text-[#B91C1C] whitespace-nowrap cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Remove
+                      </button>
+                    )}
                   </div>
                 </div>
               </article>
@@ -287,10 +300,10 @@ export function SourcesDirectoryView({
               </button>
             </div>
 
-            {!user ? (
+            {!isOwner ? (
               <div className="p-8 text-center">
                 <p className="text-sm font-medium text-[#0F172A]">
-                  Sign in required to register new sources
+                  Owner sign-in required to register new sources
                 </p>
                 <button
                   type="button"
@@ -298,7 +311,7 @@ export function SourcesDirectoryView({
                   className="mt-4 inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] cursor-pointer"
                 >
                   <LogIn className="h-3.5 w-3.5" />
-                  Sign in with Google
+                  Owner Sign In
                 </button>
               </div>
             ) : (
@@ -456,14 +469,14 @@ export function SourcesDirectoryView({
               </button>
             </div>
 
-            {!user ? (
+            {!isOwner ? (
               <div className="p-8 text-center">
                 <p className="font-serif text-base font-semibold text-[#0F172A]">
-                  Reviewer Sign-In Required
+                  Owner Sign-In Required
                 </p>
                 <p className="mt-1.5 text-xs leading-relaxed text-[#475569]">
-                  Sign in with Google before permanently removing “{sourceToDelete.name}” from the
-                  registry.
+                  Sign in with the owner Google account before permanently removing “{sourceToDelete.name}”
+                  from the registry.
                 </p>
                 <button
                   type="button"
@@ -471,7 +484,7 @@ export function SourcesDirectoryView({
                   className="mt-5 inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] cursor-pointer"
                 >
                   <LogIn className="h-3.5 w-3.5" />
-                  Sign in with Google
+                  Owner Sign In
                 </button>
               </div>
             ) : (

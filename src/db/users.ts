@@ -1,17 +1,30 @@
 import { db } from './index.ts';
 import { users } from './schema.ts';
 
-const INITIAL_ADMIN_EMAIL = 'tiago.cruz2010@gmail.com';
+const DEFAULT_OWNER_ADMIN_EMAIL = 'tiago.cruz2010@gmail.com';
 
-export async function getOrCreateUser(
+export function getOwnerAdminEmail(): string {
+  const configured = process.env.OWNER_ADMIN_EMAIL?.trim().toLowerCase();
+  return configured || DEFAULT_OWNER_ADMIN_EMAIL;
+}
+
+export function isOwnerAdminEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return email.trim().toLowerCase() === getOwnerAdminEmail();
+}
+
+export async function syncOwnerAdminUser(
   uid: string,
   email: string,
   displayName?: string
 ) {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!isOwnerAdminEmail(normalizedEmail)) {
+    throw new Error('Only the app owner account may be synchronized.');
+  }
+
   try {
-    const normalizedEmail = email.toLowerCase();
-    const role = normalizedEmail === INITIAL_ADMIN_EMAIL ? 'admin' : 'reviewer';
-    const name = displayName?.trim() || normalizedEmail.split('@')[0] || 'Researcher';
+    const name = displayName?.trim() || normalizedEmail.split('@')[0] || 'Administrator';
 
     const result = await db
       .insert(users)
@@ -19,20 +32,21 @@ export async function getOrCreateUser(
         uid,
         email: normalizedEmail,
         displayName: name,
-        role,
+        role: 'admin',
       })
       .onConflictDoUpdate({
         target: users.uid,
         set: {
           email: normalizedEmail,
           displayName: name,
+          role: 'admin',
         },
       })
       .returning();
 
     return result[0];
   } catch (error) {
-    console.error('Database user upsert failed:', error);
-    throw new Error('Failed to synchronize reviewer profile.', { cause: error });
+    console.error('Database owner profile upsert failed:', error);
+    throw new Error('Failed to synchronize owner administrator profile.', { cause: error });
   }
 }

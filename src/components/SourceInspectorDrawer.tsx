@@ -19,6 +19,7 @@ import type { BirthReportRecord, ReportDetailRecord } from '../types/observatory
 
 interface SourceInspectorDrawerProps {
   reportId: number | null;
+  isOwner: boolean;
   refreshNonce: number;
   onClose: () => void;
   onSelectReportId: (id: number) => void;
@@ -27,6 +28,7 @@ interface SourceInspectorDrawerProps {
 
 export function SourceInspectorDrawer({
   reportId,
+  isOwner,
   refreshNonce,
   onClose,
   onSelectReportId,
@@ -330,14 +332,18 @@ export function SourceInspectorDrawer({
             <span className="text-xs text-[#64748B]">
               Updated {formatDateShort(detail.updatedAt)}
             </span>
-            <button
-              type="button"
-              onClick={() => onRequestOverride(detail)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] cursor-pointer"
-            >
-              <PenLine className="h-3.5 w-3.5" />
-              Override / Correct Figure
-            </button>
+            {isOwner ? (
+              <button
+                type="button"
+                onClick={() => onRequestOverride(detail)}
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] cursor-pointer"
+              >
+                <PenLine className="h-3.5 w-3.5" />
+                Override / Correct Figure
+              </button>
+            ) : (
+              <span className="text-xs text-[#64748B]">Read-only provenance</span>
+            )}
           </div>
         )}
       </aside>

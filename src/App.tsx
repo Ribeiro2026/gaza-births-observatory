@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BarChart2,
   BookOpen,
@@ -8,17 +8,21 @@ import {
   LogOut,
   Menu,
   Plus,
+  Scale,
   Table2,
   X,
 } from 'lucide-react';
 import { AnalyticsView } from './components/AnalyticsView';
 import { BirthHeatmapsPanel } from './components/BirthHeatmapsPanel';
 import { DataExplorerView } from './components/DataExplorerView';
+import { DiscrepancyReportView } from './components/DiscrepancyReportView';
+import { HeaderReportSearch } from './components/HeaderReportSearch';
 import { IngestionPipelineView } from './components/IngestionPipelineView';
 import { ManualReportModal } from './components/ManualReportModal';
 import { SourceInspectorDrawer } from './components/SourceInspectorDrawer';
 import { SourcesDirectoryView } from './components/SourcesDirectoryView';
 import { useAuth } from './context/AuthContext';
+import { analyzeDiscrepancies } from './lib/discrepancy-engine';
 import { cn } from './lib/utils';
 import type {
   BirthReportRecord,
@@ -27,18 +31,35 @@ import type {
   StagingRecord,
 } from './types/observatory';
 
-type ActiveTab = 'analytics' | 'heatmaps' | 'explorer' | 'ingestion' | 'sources';
+type ActiveTab =
+  | 'analytics'
+  | 'heatmaps'
+  | 'discrepancies'
+  | 'explorer'
+  | 'ingestion'
+  | 'sources';
 
 const TAB_LABELS: Record<ActiveTab, string> = {
   analytics: 'Analytics & Discrepancies',
   heatmaps: 'Heatmaps & Matrices',
+  discrepancies: 'Discrepancy Report',
   explorer: 'Data Explorer',
   ingestion: 'Ingestion Pipeline',
   sources: 'Source Registry',
 };
 
 export default function App() {
-  const { user, role, loading: authLoading, signIn, signOut } = useAuth();
+  const {
+    user,
+    isOwner,
+    loading: authLoading,
+    signingIn,
+    authError,
+    clearAuthError,
+    signIn,
+    signOut,
+    authFetch,
+  } = useAuth();
   const [activeTab, setActiveTab] = useState<ActiveTab>('analytics');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -54,32 +75,31 @@ export default function App() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingReport, setEditingReport] = useState<BirthReportRecord | null>(null);
   const [explorerSourceFilter, setExplorerSourceFilter] = useState<number | null>(null);
+  const [explorerSearchQuery, setExplorerSearchQuery] = useState('');
+  const [explorerSearchNonce, setExplorerSearchNonce] = useState(0);
 
-  const fetchAllData = useCallback(async () => {
+  const fetchPublicData = useCallback(async () => {
     setLoadError(null);
     try {
-      const [srcRes, repRes, revRes, stgRes] = await Promise.all([
+      const [srcRes, repRes, revRes] = await Promise.all([
         fetch('/api/sources'),
         fetch('/api/reports'),
         fetch('/api/revisions'),
-        fetch('/api/staging'),
       ]);
 
-      if (!srcRes.ok || !repRes.ok || !revRes.ok || !stgRes.ok) {
+      if (!srcRes.ok || !repRes.ok || !revRes.ok) {
         throw new Error('One or more observatory endpoints returned an error.');
       }
 
-      const [srcData, repData, revData, stgData] = await Promise.all([
+      const [srcData, repData, revData] = await Promise.all([
         srcRes.json(),
         repRes.json(),
         revRes.json(),
-        stgRes.json(),
       ]);
 
       setSources(srcData);
       setReports(repData);
       setRevisions(revData);
-      setStagingItems(stgData);
       setInspectorRefreshNonce((n) => n + 1);
     } catch (err: unknown) {
       setLoadError(
@@ -92,26 +112,74 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
+  const fetchStagingData = useCallback(async () => {
+    if (!isOwner) {
+      setStagingItems([]);
+      return;
+    }
+    try {
+      const stgRes = await authFetch('/api/staging');
+      if (stgRes.ok) {
+        const stgData = await stgRes.json();
+        setStagingItems(stgData);
+      } else if (stgRes.status === 401 || stgRes.status === 403) {
+        setStagingItems([]);
+      }
+    } catch {
+      // Keep existing state on transient network failure
+    }
+  }, [isOwner, authFetch]);
 
-  const pendingStagingCount = stagingItems.filter(
-    (s) => s.reviewStatus === 'Needs Review'
-  ).length;
+  const fetchAllData = useCallback(async () => {
+    await Promise.all([fetchPublicData(), fetchStagingData()]);
+  }, [fetchPublicData, fetchStagingData]);
+
+  useEffect(() => {
+    fetchPublicData();
+  }, [fetchPublicData]);
+
+  useEffect(() => {
+    if (isOwner) {
+      fetchStagingData();
+    } else {
+      setStagingItems([]);
+      setModalOpen(false);
+      setEditingReport(null);
+      setActiveTab((current) => (current === 'ingestion' ? 'analytics' : current));
+    }
+  }, [isOwner, fetchStagingData]);
+
+  const pendingStagingCount = isOwner
+    ? stagingItems.filter((s) => s.reviewStatus === 'Needs Review').length
+    : 0;
+
+  const flaggedDiscrepancyCount = useMemo(
+    () => analyzeDiscrepancies(reports).totalFlaggedPeriods,
+    [reports]
+  );
 
   const openNewReportModal = () => {
+    if (!isOwner) return;
     setEditingReport(null);
     setModalOpen(true);
   };
 
   const openOverrideModal = (report: BirthReportRecord) => {
+    if (!isOwner) return;
     setEditingReport(report);
     setModalOpen(true);
   };
 
   const handleExploreSource = (sourceId: number) => {
+    setExplorerSearchQuery('');
     setExplorerSourceFilter(sourceId);
+    setActiveTab('explorer');
+  };
+
+  const handleHeaderSearchToExplorer = (query: string) => {
+    setExplorerSourceFilter(null);
+    setExplorerSearchQuery(query);
+    setExplorerSearchNonce((n) => n + 1);
     setActiveTab('explorer');
   };
 
@@ -139,17 +207,27 @@ export default function App() {
     { id: 'analytics', label: 'Analytics', icon: BarChart2 },
     { id: 'heatmaps', label: 'Heatmaps', icon: Grid3X3 },
     {
+      id: 'discrepancies',
+      label: 'Discrepancies',
+      icon: Scale,
+      meta: flaggedDiscrepancyCount > 0 ? String(flaggedDiscrepancyCount) : undefined,
+    },
+    {
       id: 'explorer',
       label: 'Data Explorer',
       icon: Table2,
       meta: reports.length > 0 ? String(reports.length) : undefined,
     },
-    {
-      id: 'ingestion',
-      label: 'Ingestion Queue',
-      icon: Inbox,
-      meta: pendingStagingCount > 0 ? String(pendingStagingCount) : undefined,
-    },
+    ...(isOwner
+      ? [
+          {
+            id: 'ingestion' as const,
+            label: 'Ingestion Queue',
+            icon: Inbox,
+            meta: pendingStagingCount > 0 ? String(pendingStagingCount) : undefined,
+          },
+        ]
+      : []),
     {
       id: 'sources',
       label: 'Sources',
@@ -218,7 +296,9 @@ export default function App() {
                       'font-mono text-[11px] tabular-nums',
                       item.id === 'ingestion' && pendingStagingCount > 0
                         ? 'font-semibold text-[#1E3A8A]'
-                        : 'text-[#64748B]'
+                        : item.id === 'discrepancies' && flaggedDiscrepancyCount > 0
+                          ? 'font-semibold text-[#B45309]'
+                          : 'text-[#64748B]'
                     )}
                   >
                     {item.meta}
@@ -230,18 +310,18 @@ export default function App() {
         </nav>
       </div>
 
-      {/* Reviewer Account Footer */}
+      {/* Owner Administration Footer */}
       <div className="border-t border-[#E2E8F0] p-4">
         {authLoading ? (
           <div className="h-9 animate-pulse rounded bg-[#F1F5F9]" />
-        ) : user ? (
+        ) : isOwner && user ? (
           <div className="space-y-2.5">
             <div className="truncate">
               <div className="truncate text-xs font-medium text-[#0F172A]">
                 {user.displayName || user.email}
               </div>
               <div className="truncate text-[11px] text-[#64748B]">
-                {user.email} · {role === 'admin' ? 'Admin' : 'Reviewer'}
+                {user.email} · Owner &amp; Admin
               </div>
             </div>
             <button
@@ -254,17 +334,34 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2.5">
+            {authError && (
+              <div
+                role="alert"
+                className="flex items-start justify-between gap-2 rounded-md border border-[#FECACA] bg-[#FEF2F2] px-2.5 py-2 text-[11px] leading-snug text-[#991B1B]"
+              >
+                <span>{authError}</span>
+                <button
+                  type="button"
+                  onClick={clearAuthError}
+                  aria-label="Dismiss access notice"
+                  className="shrink-0 rounded p-0.5 text-[#991B1B] hover:bg-[#FEE2E2] cursor-pointer"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )}
             <p className="text-[11px] leading-relaxed text-[#64748B]">
-              Sign in with Google to log reports, override counts, or approve staged extractions.
+              Public read-only observatory. Owner sign-in unlocks editorial controls.
             </p>
             <button
               type="button"
+              disabled={signingIn}
               onClick={() => signIn()}
-              className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] hover:bg-[#F8FAFC] cursor-pointer"
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] hover:bg-[#F8FAFC] disabled:opacity-50 cursor-pointer"
             >
               <LogIn className="h-3.5 w-3.5 text-[#1E3A8A]" />
-              Sign in with Google
+              {signingIn ? 'Verifying Owner...' : 'Owner Sign In'}
             </button>
           </div>
         )}
@@ -296,9 +393,9 @@ export default function App() {
 
       {/* Main Content Workspace */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top Bar Contract: Breadcrumb on left, 1 primary action on right */}
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-8 border-b border-[#E2E8F0] bg-white/95 px-5 backdrop-blur-xs lg:px-8">
-          <div className="flex items-center gap-3 min-w-0">
+        {/* Top Bar Contract: Breadcrumb on left, Global Search + primary owner action on right */}
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-4 border-b border-[#E2E8F0] bg-white/95 px-5 backdrop-blur-xs lg:gap-8 lg:px-8">
+          <div className="flex items-center gap-3 min-w-0 shrink">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
@@ -309,23 +406,32 @@ export default function App() {
             </button>
 
             <div className="flex items-center gap-2 text-xs text-[#64748B] truncate">
-              <span className="hidden sm:inline whitespace-nowrap">Observatory</span>
-              <span className="hidden sm:inline text-[#CBD5E1]">/</span>
+              <span className="hidden md:inline whitespace-nowrap">Observatory</span>
+              <span className="hidden md:inline text-[#CBD5E1]">/</span>
               <span className="font-medium text-[#0F172A] truncate">
                 {TAB_LABELS[activeTab]}
               </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={openNewReportModal}
-              className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A8A] px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Log Report
-            </button>
+          <div className="flex flex-1 items-center justify-end gap-3 min-w-0">
+            <HeaderReportSearch
+              reports={reports}
+              loading={loading}
+              onSelectReport={(id) => setInspectedReportId(id)}
+              onViewAllInExplorer={handleHeaderSearchToExplorer}
+            />
+
+            {isOwner && (
+              <button
+                type="button"
+                onClick={openNewReportModal}
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A8A] px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Log Report
+              </button>
+            )}
           </div>
         </header>
 
@@ -350,9 +456,13 @@ export default function App() {
               reports={reports}
               revisions={revisions}
               pendingStagingCount={pendingStagingCount}
+              isOwner={isOwner}
               loading={loading}
               onInspectReport={(id) => setInspectedReportId(id)}
-              onNavigateTab={(tab) => setActiveTab(tab)}
+              onNavigateTab={(tab) => {
+                if (tab === 'ingestion' && !isOwner) return;
+                setActiveTab(tab);
+              }}
             />
           )}
 
@@ -387,20 +497,34 @@ export default function App() {
             </div>
           )}
 
+          {activeTab === 'discrepancies' && (
+            <DiscrepancyReportView
+              reports={reports}
+              isOwner={isOwner}
+              loading={loading}
+              onInspectReport={(id) => setInspectedReportId(id)}
+              onOpenOverride={openOverrideModal}
+            />
+          )}
+
           {activeTab === 'explorer' && (
             <DataExplorerView
               reports={reports}
               sources={sources}
+              isOwner={isOwner}
               loading={loading}
               initialSourceId={explorerSourceFilter}
+              initialSearchQuery={explorerSearchQuery}
+              searchSyncNonce={explorerSearchNonce}
               onClearInitialSource={() => setExplorerSourceFilter(null)}
+              onClearInitialSearch={() => setExplorerSearchQuery('')}
               onInspectReport={(id) => setInspectedReportId(id)}
               onOpenNewReport={openNewReportModal}
               onOpenOverride={openOverrideModal}
             />
           )}
 
-          {activeTab === 'ingestion' && (
+          {activeTab === 'ingestion' && isOwner && (
             <IngestionPipelineView
               sources={sources}
               stagingItems={stagingItems}
@@ -413,6 +537,7 @@ export default function App() {
           {activeTab === 'sources' && (
             <SourcesDirectoryView
               sources={sources}
+              isOwner={isOwner}
               loading={loading}
               onRefreshAll={fetchAllData}
               onSourceDeleted={handleSourceDeleted}
@@ -425,20 +550,23 @@ export default function App() {
       {/* Slide-Over Source & Revision Inspector Drawer */}
       <SourceInspectorDrawer
         reportId={inspectedReportId}
+        isOwner={isOwner}
         refreshNonce={inspectorRefreshNonce}
         onClose={() => setInspectedReportId(null)}
         onSelectReportId={(id) => setInspectedReportId(id)}
         onRequestOverride={(report) => openOverrideModal(report)}
       />
 
-      {/* Manual Entry & Override Modal */}
-      <ManualReportModal
-        isOpen={modalOpen}
-        sources={sources}
-        editingReport={editingReport}
-        onClose={() => setModalOpen(false)}
-        onSaved={() => fetchAllData()}
-      />
+      {/* Manual Entry & Override Modal (Owner Only) */}
+      {isOwner && (
+        <ManualReportModal
+          isOpen={modalOpen}
+          sources={sources}
+          editingReport={editingReport}
+          onClose={() => setModalOpen(false)}
+          onSaved={() => fetchAllData()}
+        />
+      )}
     </div>
   );
 }

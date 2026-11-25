@@ -18,7 +18,7 @@ import {
   rejectStagingItem,
   stageExtractedRecords,
 } from './src/db/repository.ts';
-import { AuthRequest, requireAuth } from './src/middleware/auth.ts';
+import { AuthRequest, requireOwnerAuth } from './src/middleware/auth.ts';
 import {
   extractBirthStatsWithGemini,
   fetchPublicUrlContent,
@@ -120,13 +120,14 @@ async function startServer() {
 
   app.use(express.json({ limit: '1mb' }));
 
-  // Current authenticated reviewer profile
-  app.get('/api/me', requireAuth, (req: AuthRequest, res: Response) => {
+  // Current authenticated owner profile
+  app.get('/api/me', requireOwnerAuth, (req: AuthRequest, res: Response) => {
     res.json({
       uid: req.user?.uid,
       email: req.user?.email,
       displayName: req.user?.name || req.user?.email,
-      role: req.user?.role || 'reviewer',
+      role: req.user?.role || 'admin',
+      isOwner: true,
     });
   });
 
@@ -141,7 +142,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/sources', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.post('/api/sources', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const parsed = createSourceSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
@@ -157,7 +158,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/sources/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.delete('/api/sources/:id', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const sourceId = Number(req.params.id);
     if (!Number.isInteger(sourceId) || sourceId <= 0) {
       return res.status(400).json({ error: 'Invalid source identifier.' });
@@ -221,7 +222,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/reports', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.post('/api/reports', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const parsed = createReportSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
@@ -242,7 +243,7 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/reports/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.patch('/api/reports/:id', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const reportId = Number(req.params.id);
     if (!Number.isInteger(reportId) || reportId <= 0) {
       return res.status(400).json({ error: 'Invalid report identifier.' });
@@ -283,8 +284,8 @@ async function startServer() {
     }
   });
 
-  // Staging Queue & Automated Ingestion Pipeline
-  app.get('/api/staging', async (req: Request, res: Response) => {
+  // Staging Queue & Automated Ingestion Pipeline (Owner Only)
+  app.get('/api/staging', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     try {
       const status = typeof req.query.status === 'string' ? req.query.status : undefined;
       const data = await listStagingQueue(status);
@@ -295,7 +296,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/ingest/extract-text', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.post('/api/ingest/extract-text', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const parsed = extractTextSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
@@ -345,7 +346,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/ingest/fetch-url', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.post('/api/ingest/fetch-url', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const parsed = fetchUrlSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({
@@ -396,7 +397,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/staging/:id/approve', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.post('/api/staging/:id/approve', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const stagingId = Number(req.params.id);
     if (!Number.isInteger(stagingId) || stagingId <= 0) {
       return res.status(400).json({ error: 'Invalid staging item identifier.' });
@@ -422,7 +423,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/staging/:id/reject', requireAuth, async (req: AuthRequest, res: Response) => {
+  app.post('/api/staging/:id/reject', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
     const stagingId = Number(req.params.id);
     if (!Number.isInteger(stagingId) || stagingId <= 0) {
       return res.status(400).json({ error: 'Invalid staging item identifier.' });
@@ -439,7 +440,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/ingest/template', (_req: Request, res: Response) => {
+  app.get('/api/ingest/template', requireOwnerAuth, (_req: AuthRequest, res: Response) => {
     res.json({
       filename: 'gaza-births-worker.ts',
       content: SCRAPER_CRON_TEMPLATE,

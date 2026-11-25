@@ -58,7 +58,7 @@ export function IngestionPipelineView({
   onRefreshAll,
   onInspectReport,
 }: IngestionPipelineViewProps) {
-  const { user, signIn, authFetch } = useAuth();
+  const { isOwner, signIn, authFetch } = useAuth();
   const [subTab, setSubTab] = useState<'queue' | 'extract' | 'template'>('queue');
   const [queueFilter, setQueueFilter] = useState<'Needs Review' | 'Approved' | 'Rejected' | 'All'>(
     'Needs Review'
@@ -98,13 +98,16 @@ export function IngestionPipelineView({
   const [copiedTemplate, setCopiedTemplate] = useState(false);
 
   useEffect(() => {
-    if (subTab === 'template' && !templateCode) {
-      fetch('/api/ingest/template')
-        .then((r) => r.json())
+    if (subTab === 'template' && !templateCode && isOwner) {
+      authFetch('/api/ingest/template')
+        .then(async (r) => {
+          if (!r.ok) throw new Error('Unauthorized');
+          return r.json();
+        })
         .then((d) => setTemplateCode(d.content || ''))
         .catch(() => setTemplateCode('// Unable to load template from server.'));
     }
-  }, [subTab, templateCode]);
+  }, [subTab, templateCode, isOwner, authFetch]);
 
   const getDraft = (item: StagingRecord) => {
     if (editingDrafts[item.id]) return editingDrafts[item.id];
@@ -359,14 +362,14 @@ export function IngestionPipelineView({
               ))}
             </div>
 
-            {!user && (
+            {!isOwner && (
               <button
                 type="button"
                 onClick={() => signIn()}
                 className="inline-flex items-center gap-1.5 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
               >
                 <LogIn className="h-3.5 w-3.5" />
-                Sign in with Google to approve or reject items
+                Owner sign-in required to approve or reject items
               </button>
             )}
           </div>
@@ -611,7 +614,7 @@ export function IngestionPipelineView({
                           <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
-                              disabled={busyId === item.id || !user}
+                              disabled={busyId === item.id || !isOwner}
                               onClick={() => handleReject(item)}
                               className="inline-flex items-center gap-1 rounded-md border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] hover:bg-[#F8FAFC] disabled:opacity-50 cursor-pointer"
                             >
@@ -620,7 +623,7 @@ export function IngestionPipelineView({
                             </button>
                             <button
                               type="button"
-                              disabled={busyId === item.id || !user}
+                              disabled={busyId === item.id || !isOwner}
                               onClick={() => handleApprove(item, 'Disputed')}
                               className="inline-flex items-center gap-1 rounded-md border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#B45309] hover:bg-[#FFFBEB] disabled:opacity-50 cursor-pointer"
                             >
@@ -628,7 +631,7 @@ export function IngestionPipelineView({
                             </button>
                             <button
                               type="button"
-                              disabled={busyId === item.id || !user}
+                              disabled={busyId === item.id || !isOwner}
                               onClick={() => handleApprove(item, 'Verified')}
                               className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A8A] px-3.5 py-1.5 text-xs font-medium text-white hover:bg-[#172D6B] disabled:opacity-50 cursor-pointer"
                             >
@@ -701,13 +704,13 @@ export function IngestionPipelineView({
             </span>
           </div>
 
-          {!user ? (
+          {!isOwner ? (
             <div className="p-10 text-center">
               <p className="font-serif text-base font-semibold text-[#0F172A]">
-                Sign in to run live ingestion jobs
+                Owner sign-in required to run live ingestion jobs
               </p>
               <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-[#475569]">
-                Live RSS fetching and Gemini extraction require an authenticated reviewer session.
+                Live RSS fetching and Gemini extraction are restricted to the app owner.
               </p>
               <button
                 type="button"
@@ -715,7 +718,7 @@ export function IngestionPipelineView({
                 className="mt-5 inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-5 py-2.5 text-xs font-medium text-white hover:bg-[#172D6B] cursor-pointer"
               >
                 <LogIn className="h-3.5 w-3.5" />
-                Sign in with Google
+                Owner Sign In
               </button>
             </div>
           ) : (

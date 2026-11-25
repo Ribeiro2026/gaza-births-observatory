@@ -23,7 +23,7 @@ export function ManualReportModal({
   onClose,
   onSaved,
 }: ManualReportModalProps) {
-  const { user, signIn, authFetch } = useAuth();
+  const { isOwner, signIn, authFetch } = useAuth();
   const [sourceId, setSourceId] = useState<string>('');
   const [periodType, setPeriodType] = useState<PeriodType>('Monthly');
   const [periodValue, setPeriodValue] = useState('2026-11');
@@ -159,14 +159,14 @@ export function ManualReportModal({
           </button>
         </div>
 
-        {!user ? (
+        {!isOwner ? (
           <div className="p-8 text-center">
             <p className="font-serif text-base font-semibold text-[#0F172A]">
-              Reviewer Sign-In Required
+              Owner Sign-In Required
             </p>
             <p className="mx-auto mt-1.5 max-w-sm text-xs leading-relaxed text-[#475569]">
-              To preserve audit attribution on every manual submission and override, please sign in
-              with your Google account.
+              Only the verified app owner can submit manual birth reports or record figure
+              overrides.
             </p>
             <button
               type="button"
@@ -174,7 +174,7 @@ export function ManualReportModal({
               className="mt-5 inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-5 py-2.5 text-xs font-medium text-white hover:bg-[#172D6B] cursor-pointer"
             >
               <LogIn className="h-3.5 w-3.5" />
-              Sign in with Google
+              Owner Sign In
             </button>
           </div>
         ) : (

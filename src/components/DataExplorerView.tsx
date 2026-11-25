@@ -24,12 +24,18 @@ import type {
   SourceType,
 } from '../types/observatory';
 
+import { matchesReportQuery } from './HeaderReportSearch';
+
 interface DataExplorerViewProps {
   reports: BirthReportRecord[];
   sources: SourceRecord[];
+  isOwner: boolean;
   loading: boolean;
   initialSourceId?: number | null;
+  initialSearchQuery?: string;
+  searchSyncNonce?: number;
   onClearInitialSource?: () => void;
+  onClearInitialSearch?: () => void;
   onInspectReport: (reportId: number) => void;
   onOpenNewReport: () => void;
   onOpenOverride: (report: BirthReportRecord) => void;
@@ -55,14 +61,18 @@ const MONTHS = [
 export function DataExplorerView({
   reports,
   sources,
+  isOwner,
   loading,
   initialSourceId,
+  initialSearchQuery,
+  searchSyncNonce,
   onClearInitialSource,
+  onClearInitialSearch,
   onInspectReport,
   onOpenNewReport,
   onOpenOverride,
 }: DataExplorerViewProps) {
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(initialSearchQuery || '');
   const [periodType, setPeriodType] = useState<'All' | PeriodType>('All');
   const [year, setYear] = useState('All');
   const [month, setMonth] = useState('All');
@@ -82,6 +92,21 @@ export function DataExplorerView({
       setSourceId(String(initialSourceId));
     }
   }, [initialSourceId]);
+
+  // Synchronize search query when submitted from the global header search bar
+  React.useEffect(() => {
+    if (searchSyncNonce && initialSearchQuery !== undefined) {
+      setSearch(initialSearchQuery);
+      setSourceId('All');
+      setPeriodType('All');
+      setYear('All');
+      setMonth('All');
+      setSourceType('All');
+      setStatus('All');
+      setPublishedFrom('');
+      setPublishedTo('');
+    }
+  }, [initialSearchQuery, searchSyncNonce]);
 
   const availableYears = useMemo(() => {
     const yrs = new Set(reports.map((r) => r.periodValue.slice(0, 4)));
@@ -107,9 +132,8 @@ export function DataExplorerView({
           toDate.setHours(23, 59, 59, 999);
           if (new Date(r.publicationDate).getTime() > toDate.getTime()) return false;
         }
-        if (q) {
-          const hay = `${r.sourceName} ${r.periodValue} ${r.documentRef} ${r.rawTextSnippet}`.toLowerCase();
-          if (!hay.includes(q)) return false;
+        if (q && !matchesReportQuery(r, q)) {
+          return false;
         }
         return true;
       })
@@ -161,6 +185,7 @@ export function DataExplorerView({
     setPublishedFrom('');
     setPublishedTo('');
     onClearInitialSource?.();
+    onClearInitialSearch?.();
   };
 
   const hasActiveFilters =
@@ -188,14 +213,16 @@ export function DataExplorerView({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenNewReport}
-          className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Log Manual Report
-        </button>
+        {isOwner && (
+          <button
+            type="button"
+            onClick={onOpenNewReport}
+            className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Log Manual Report
+          </button>
+        )}
       </div>
 
       {/* Multi-Facet Filter Bar */}
@@ -379,7 +406,9 @@ export function DataExplorerView({
                     <ArrowUpDown className="h-3 w-3" />
                   </button>
                 </th>
-                <th className="px-4 py-3 text-right font-medium">Actions</th>
+                <th className="px-4 py-3 text-right font-medium">
+                  {isOwner ? 'Actions' : 'Source'}
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F1F5F9]">
@@ -398,7 +427,9 @@ export function DataExplorerView({
                       No birth reports match these filter criteria.
                     </p>
                     <p className="mt-1 text-xs text-[#64748B]">
-                      Try clearing your search or logging a new verified bulletin.
+                      {isOwner
+                        ? 'Try clearing your search or logging a new verified bulletin.'
+                        : 'Try clearing or broadening your search filters.'}
                     </p>
                   </td>
                 </tr>
@@ -468,14 +499,16 @@ export function DataExplorerView({
                       onClick={(e) => e.stopPropagation()}
                     >
                       <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onOpenOverride(row)}
-                          className="inline-flex items-center gap-1 rounded border border-[#CBD5E1] bg-white px-2.5 py-1 text-[11px] font-medium text-[#334155] hover:bg-[#F8FAFC] hover:text-[#0F172A] cursor-pointer"
-                        >
-                          <PenLine className="h-3 w-3" />
-                          Override
-                        </button>
+                        {isOwner && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenOverride(row)}
+                            className="inline-flex items-center gap-1 rounded border border-[#CBD5E1] bg-white px-2.5 py-1 text-[11px] font-medium text-[#334155] hover:bg-[#F8FAFC] hover:text-[#0F172A] cursor-pointer"
+                          >
+                            <PenLine className="h-3 w-3" />
+                            Override
+                          </button>
+                        )}
                         {isSafeHttpUrl(row.sourceUrl) && (
                           <a
                             href={row.sourceUrl}
