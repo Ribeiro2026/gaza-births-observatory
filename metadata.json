@@ -1,0 +1,8 @@
+{
+  "name": "Gaza Births Observatory",
+  "description": "Research-grade demographic dashboard to track, compare, audit, and visualize Gaza birth statistics across government registries, humanitarian agencies, news outlets, and official channels.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
