@@ -1,10 +1,12 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  Area,
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Line,
-  LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -17,8 +19,10 @@ import {
   History,
   LineChart as LineChartIcon,
   SlidersHorizontal,
+  TrendingUp,
 } from 'lucide-react';
 import { exportChartToPng } from '../lib/chart-export';
+import { computeLinearTrendProjection } from '../lib/trend-projection';
 import {
   cn,
   formatDateShort,
@@ -52,8 +56,16 @@ type ConfidenceScope = 'verified' | 'active' | 'all';
 interface ChartPeriodRow {
   periodValue: string;
   label: string;
-  [key: string]: string | number | undefined;
+  isProjection?: boolean;
+  projEstimate?: number;
+  projLow?: number;
+  projHigh?: number;
+  projBand?: [number, number];
+  [key: string]: string | number | boolean | [number, number] | undefined;
 }
+
+const MONTHLY_HORIZONS = [3, 6, 12] as const;
+const YEARLY_HORIZONS = [1, 2, 3] as const;
 
 export function AnalyticsView({
   sources,
@@ -70,6 +82,9 @@ export function AnalyticsView({
   const [yearFilter, setYearFilter] = useState<string>('All');
   const [confidenceScope, setConfidenceScope] = useState<ConfidenceScope>('active');
   const [hiddenSourceIds, setHiddenSourceIds] = useState<number[]>([]);
+  const [showProjection, setShowProjection] = useState(false);
+  const [monthlyHorizon, setMonthlyHorizon] = useState<(typeof MONTHLY_HORIZONS)[number]>(6);
+  const [yearlyHorizon, setYearlyHorizon] = useState<(typeof YEARLY_HORIZONS)[number]>(2);
   const [exporting, setExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
@@ -196,6 +211,48 @@ export function AnalyticsView({
     };
   }, [filteredReports, periodDiscrepancies, reports, revisions.length]);
 
+  // Optional near-term linear trend projection over active consensus median
+  const activeHorizon = periodType === 'Monthly' ? monthlyHorizon : yearlyHorizon;
+
+  const projection = useMemo(() => {
+    if (!showProjection) return null;
+    return computeLinearTrendProjection(filteredReports, periodType, activeHorizon);
+  }, [showProjection, filteredReports, periodType, activeHorizon]);
+
+  const displayChartData = useMemo(() => {
+    if (!showProjection || !projection?.available || projection.points.length === 0) {
+      return chartData;
+    }
+
+    const withAnchor: ChartPeriodRow[] = chartData.map((row) => {
+      if (
+        row.periodValue === projection.anchorPeriodValue &&
+        projection.anchorConsensusValue !== undefined
+      ) {
+        return {
+          ...row,
+          projEstimate: projection.anchorConsensusValue,
+          projLow: projection.anchorConsensusValue,
+          projHigh: projection.anchorConsensusValue,
+          projBand: [projection.anchorConsensusValue, projection.anchorConsensusValue],
+        };
+      }
+      return row;
+    });
+
+    const futureRows: ChartPeriodRow[] = projection.points.map((pt) => ({
+      periodValue: pt.periodValue,
+      label: pt.label,
+      isProjection: true,
+      projEstimate: pt.estimate,
+      projLow: pt.low,
+      projHigh: pt.high,
+      projBand: [pt.low, pt.high],
+    }));
+
+    return [...withAnchor, ...futureRows];
+  }, [chartData, showProjection, projection]);
+
   const toggleSource = (sourceId: number) => {
     setHiddenSourceIds((prev) =>
       prev.includes(sourceId) ? prev.filter((id) => id !== sourceId) : [...prev, sourceId]
@@ -213,16 +270,33 @@ export function AnalyticsView({
           : confidenceScope === 'active'
             ? 'Verified, Pending & Disputed'
             : 'All (incl. Superseded)';
-      const filterDesc = `${periodType} · Year: ${yearFilter} · Scope: ${scopeLabel} · ${plottedSources.length} sources`;
+      const projLabel =
+        showProjection && projection?.available && projection.summary
+          ? ` · Projection: +${projection.summary.horizonSteps} ${projection.summary.unitLabel}${
+              projection.summary.horizonSteps === 1 ? '' : 's'
+            } OLS (95% CI)`
+          : '';
+      const filterDesc = `${periodType} · Year: ${yearFilter} · Scope: ${scopeLabel} · ${plottedSources.length} sources${projLabel}`;
+
+      const legendItems = [
+        ...plottedSources.map((s) => ({ label: s.name, color: s.seriesColor })),
+        ...(showProjection && projection?.available
+          ? [{ label: 'Consensus Projection (95% CI)', color: '#1E3A8A' }]
+          : []),
+      ];
 
       await exportChartToPng({
         containerEl: chartContainerRef.current,
         title: `Gaza Birth Statistics — ${periodType} Multi-Source Comparison`,
         subtitle:
-          'Reported live births and humanitarian estimates plotted by publishing registry and agency',
+          showProjection && projection?.available
+            ? 'Reported live births by publisher with optional OLS linear trend projection and 95% confidence band'
+            : 'Reported live births and humanitarian estimates plotted by publishing registry and agency',
         activeFiltersLabel: filterDesc,
-        legendItems: plottedSources.map((s) => ({ label: s.name, color: s.seriesColor })),
-        filename: `gaza-births-${periodType.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.png`,
+        legendItems,
+        filename: `gaza-births-${periodType.toLowerCase()}${
+          showProjection && projection?.available ? '-projected' : ''
+        }-${new Date().toISOString().slice(0, 10)}.png`,
       });
       setExportMessage('Exported high-resolution PNG with provenance watermark.');
       setTimeout(() => setExportMessage(null), 4000);
@@ -345,6 +419,67 @@ export function AnalyticsView({
                 Grouped Bars
               </button>
             </div>
+
+            {/* Optional Trend Projection Toggle + Selectable Horizon */}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                aria-pressed={showProjection}
+                onClick={() => setShowProjection((v) => !v)}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40',
+                  showProjection
+                    ? 'border-[#1E3A8A] bg-[#EFF6FF] text-[#1E3A8A]'
+                    : 'border-[#CBD5E1] bg-white text-[#475569] hover:bg-[#F8FAFC] hover:text-[#0F172A]'
+                )}
+              >
+                <TrendingUp className="h-3.5 w-3.5" />
+                Trend Projection
+                <span className="font-mono text-[10px] opacity-75">
+                  {showProjection ? 'ON' : 'OFF'}
+                </span>
+              </button>
+
+              {showProjection && (
+                <div
+                  className="inline-flex items-center rounded-md bg-[#F1F5F9] p-0.5"
+                  role="group"
+                  aria-label="Projection horizon"
+                >
+                  {periodType === 'Monthly'
+                    ? MONTHLY_HORIZONS.map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setMonthlyHorizon(m)}
+                          className={cn(
+                            'rounded px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
+                            monthlyHorizon === m
+                              ? 'bg-white text-[#1E3A8A] shadow-xs'
+                              : 'text-[#475569] hover:text-[#0F172A]'
+                          )}
+                        >
+                          +{m}m
+                        </button>
+                      ))
+                    : YEARLY_HORIZONS.map((y) => (
+                        <button
+                          key={y}
+                          type="button"
+                          onClick={() => setYearlyHorizon(y)}
+                          className={cn(
+                            'rounded px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
+                            yearlyHorizon === y
+                              ? 'bg-white text-[#1E3A8A] shadow-xs'
+                              : 'text-[#475569] hover:text-[#0F172A]'
+                          )}
+                        >
+                          +{y}y
+                        </button>
+                      ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -405,13 +540,22 @@ export function AnalyticsView({
               </button>
             );
           })}
+          {showProjection && projection?.available && (
+            <span className="inline-flex items-center gap-2 py-0.5 text-xs font-medium text-[#1E3A8A] whitespace-nowrap shrink-0">
+              <span
+                className="inline-block h-0 w-4 shrink-0 border-t-2 border-dashed border-[#1E3A8A]"
+                aria-hidden="true"
+              />
+              <span>Consensus Projection (95% CI)</span>
+            </span>
+          )}
         </div>
 
         {/* Recharts Visualization Canvas */}
         <div ref={chartContainerRef} className="p-5">
           {loading ? (
             <div className="h-[380px] w-full animate-pulse rounded bg-[#F8FAFC]" />
-          ) : chartData.length === 0 ? (
+          ) : displayChartData.length === 0 ? (
             <div className="flex h-[360px] flex-col items-center justify-center text-center">
               <p className="text-sm font-medium text-[#0F172A]">
                 No birth statistics match the current chart filters.
@@ -435,20 +579,20 @@ export function AnalyticsView({
             <div className="h-[380px] w-full">
               <ResponsiveContainer width="100%" height="100%">
                 {chartMode === 'line' ? (
-                  <LineChart
-                    data={chartData}
-                    margin={{ top: 14, right: 20, left: 10, bottom: 8 }}
+                  <ComposedChart
+                    data={displayChartData}
+                    margin={{ top: 18, right: 20, left: 10, bottom: 8 }}
                     onClick={(state) => {
                       const idx =
                         typeof state?.activeTooltipIndex === 'number'
                           ? state.activeTooltipIndex
                           : -1;
-                      const byIndex = idx >= 0 ? chartData[idx] : undefined;
+                      const byIndex = idx >= 0 ? displayChartData[idx] : undefined;
                       const byLabel = state?.activeLabel
-                        ? chartData.find((row) => row.label === String(state.activeLabel))
+                        ? displayChartData.find((row) => row.label === String(state.activeLabel))
                         : undefined;
                       const target = byIndex || byLabel;
-                      if (target?.periodValue) {
+                      if (target?.periodValue && !target.isProjection) {
                         handleChartPointClick(target.periodValue);
                       }
                     }}
@@ -471,8 +615,48 @@ export function AnalyticsView({
                     <Tooltip
                       content={({ active, payload, label }) => {
                         if (!active || !payload || payload.length === 0) return null;
-                        const periodVal = String(payload[0]?.payload?.periodValue || '');
-                        const vals = payload
+                        const row = payload[0]?.payload as ChartPeriodRow | undefined;
+                        const periodVal = String(row?.periodValue || '');
+
+                        if (row?.isProjection) {
+                          return (
+                            <div className="min-w-[240px] rounded-md border border-[#BFDBFE] bg-white p-3.5 shadow-sm">
+                              <div className="flex items-baseline justify-between border-b border-[#E2E8F0] pb-2">
+                                <span className="font-serif text-sm font-semibold text-[#1E3A8A]">
+                                  {label}
+                                </span>
+                                <span className="font-mono text-[11px] text-[#64748B]">
+                                  Projected · {periodVal}
+                                </span>
+                              </div>
+                              <div className="mt-2.5 space-y-1.5 text-xs">
+                                <div className="flex items-center justify-between gap-4">
+                                  <span className="text-[#334155]">Linear Consensus Est.</span>
+                                  <span className="font-mono font-semibold tabular-nums text-[#1E3A8A]">
+                                    ~{formatNumber(Number(row.projEstimate || 0))}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-4">
+                                  <span className="text-[#475569]">95% Confidence Band</span>
+                                  <span className="font-mono tabular-nums text-[#334155]">
+                                    {formatNumber(Number(row.projLow || 0))} –{' '}
+                                    {formatNumber(Number(row.projHigh || 0))}
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="mt-2.5 border-t border-[#F1F5F9] pt-2 text-[10px] leading-snug text-[#64748B]">
+                                Statistical extrapolation from active historical median — not an
+                                official registry report.
+                              </p>
+                            </div>
+                          );
+                        }
+
+                        const sourceEntries = payload.filter((p) =>
+                          String(p.dataKey).startsWith('s_')
+                        );
+                        if (sourceEntries.length === 0) return null;
+                        const vals = sourceEntries
                           .map((p) => Number(p.value))
                           .filter((n) => Number.isFinite(n));
                         const spread =
@@ -489,7 +673,7 @@ export function AnalyticsView({
                               </span>
                             </div>
                             <div className="mt-2.5 space-y-1.5">
-                              {payload.map((entry) => {
+                              {sourceEntries.map((entry) => {
                                 const srcId = Number(String(entry.dataKey).replace('s_', ''));
                                 const report = cellReportMap.get(`${periodVal}:${srcId}`);
                                 return (
@@ -532,12 +716,40 @@ export function AnalyticsView({
                               </div>
                             )}
                             <p className="mt-2 text-[10px] text-[#64748B]">
-                              Click point to inspect citation & revision log
+                              Click point to inspect citation &amp; revision log
                             </p>
                           </div>
                         );
                       }}
                     />
+
+                    {showProjection && projection?.available && projection.anchorLabel && (
+                      <ReferenceLine
+                        x={projection.anchorLabel}
+                        stroke="#94A3B8"
+                        strokeDasharray="4 4"
+                        label={{
+                          value: 'Forecast →',
+                          position: 'insideTopRight',
+                          fill: '#475569',
+                          fontSize: 10,
+                          fontFamily: 'IBM Plex Mono, monospace',
+                        }}
+                      />
+                    )}
+
+                    {showProjection && projection?.available && (
+                      <Area
+                        type="monotone"
+                        dataKey="projBand"
+                        name="95% Confidence Band"
+                        fill="#1E3A8A"
+                        fillOpacity={0.11}
+                        stroke="none"
+                        isAnimationActive={false}
+                      />
+                    )}
+
                     {plottedSources.map((src) => (
                       <Line
                         key={src.id}
@@ -561,18 +773,61 @@ export function AnalyticsView({
                           onClick: (_e, payload) => {
                             const row = (payload as unknown as { payload?: ChartPeriodRow })
                               ?.payload;
-                            if (row?.periodValue) {
+                            if (row?.periodValue && !row.isProjection) {
                               handleChartPointClick(row.periodValue, src.id);
                             }
                           },
                         }}
                       />
                     ))}
-                  </LineChart>
+
+                    {showProjection && projection?.available && (
+                      <Line
+                        type="monotone"
+                        dataKey="projEstimate"
+                        name="Consensus Projection"
+                        stroke="#1E3A8A"
+                        strokeWidth={2.2}
+                        strokeDasharray="6 4"
+                        isAnimationActive={false}
+                        dot={(dotProps) => {
+                          const { cx, cy, payload } = dotProps as {
+                            cx?: number;
+                            cy?: number;
+                            payload?: ChartPeriodRow;
+                          };
+                          if (
+                            !payload?.isProjection ||
+                            typeof cx !== 'number' ||
+                            typeof cy !== 'number'
+                          ) {
+                            return <g key={`empty-${String(payload?.periodValue || cx)}`} />;
+                          }
+                          return (
+                            <circle
+                              key={`proj-dot-${payload.periodValue}`}
+                              cx={cx}
+                              cy={cy}
+                              r={3.5}
+                              fill="#FFFFFF"
+                              stroke="#1E3A8A"
+                              strokeWidth={2}
+                            />
+                          );
+                        }}
+                        activeDot={{
+                          r: 5,
+                          fill: '#1E3A8A',
+                          stroke: '#FFFFFF',
+                          strokeWidth: 2,
+                        }}
+                      />
+                    )}
+                  </ComposedChart>
                 ) : (
                   <BarChart
-                    data={chartData}
-                    margin={{ top: 14, right: 20, left: 10, bottom: 8 }}
+                    data={displayChartData}
+                    margin={{ top: 18, right: 20, left: 10, bottom: 8 }}
                     barGap={3}
                   >
                     <CartesianGrid stroke="#E2E8F0" strokeDasharray="3 3" vertical={false} />
@@ -594,14 +849,51 @@ export function AnalyticsView({
                       cursor={{ fill: '#F1F5F9', opacity: 0.7 }}
                       content={({ active, payload, label }) => {
                         if (!active || !payload || payload.length === 0) return null;
-                        const periodVal = String(payload[0]?.payload?.periodValue || '');
+                        const row = payload[0]?.payload as ChartPeriodRow | undefined;
+                        const periodVal = String(row?.periodValue || '');
+
+                        if (row?.isProjection) {
+                          return (
+                            <div className="min-w-[230px] rounded-md border border-[#BFDBFE] bg-white p-3.5 shadow-sm">
+                              <div className="flex items-baseline justify-between border-b border-[#E2E8F0] pb-2">
+                                <span className="font-serif text-sm font-semibold text-[#1E3A8A]">
+                                  {label}
+                                </span>
+                                <span className="font-mono text-[11px] text-[#64748B]">
+                                  Projected · {periodVal}
+                                </span>
+                              </div>
+                              <div className="mt-2 space-y-1.5 text-xs">
+                                <div className="flex items-center justify-between gap-4">
+                                  <span className="text-[#334155]">Linear Consensus Est.</span>
+                                  <span className="font-mono font-semibold tabular-nums text-[#1E3A8A]">
+                                    ~{formatNumber(Number(row.projEstimate || 0))}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between gap-4">
+                                  <span className="text-[#475569]">95% Confidence Band</span>
+                                  <span className="font-mono tabular-nums text-[#334155]">
+                                    {formatNumber(Number(row.projLow || 0))} –{' '}
+                                    {formatNumber(Number(row.projHigh || 0))}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        const sourceEntries = payload.filter((p) =>
+                          String(p.dataKey).startsWith('s_')
+                        );
+                        if (sourceEntries.length === 0) return null;
+
                         return (
                           <div className="min-w-[220px] rounded-md border border-[#CBD5E1] bg-white p-3.5 shadow-sm">
                             <div className="border-b border-[#E2E8F0] pb-2 font-serif text-sm font-semibold text-[#0F172A]">
                               {label}
                             </div>
                             <div className="mt-2 space-y-1.5">
-                              {payload.map((entry) => (
+                              {sourceEntries.map((entry) => (
                                 <div
                                   key={String(entry.dataKey)}
                                   className="flex items-center justify-between gap-4 text-xs"
@@ -626,6 +918,22 @@ export function AnalyticsView({
                         );
                       }}
                     />
+
+                    {showProjection && projection?.available && projection.anchorLabel && (
+                      <ReferenceLine
+                        x={projection.anchorLabel}
+                        stroke="#94A3B8"
+                        strokeDasharray="4 4"
+                        label={{
+                          value: 'Forecast →',
+                          position: 'insideTopRight',
+                          fill: '#475569',
+                          fontSize: 10,
+                          fontFamily: 'IBM Plex Mono, monospace',
+                        }}
+                      />
+                    )}
+
                     {plottedSources.map((src) => (
                       <Bar
                         key={src.id}
@@ -637,13 +945,111 @@ export function AnalyticsView({
                         className="cursor-pointer"
                         onClick={(barData) => {
                           const periodVal = barData?.payload?.periodValue as string | undefined;
-                          if (periodVal) handleChartPointClick(periodVal, src.id);
+                          if (periodVal && !barData?.payload?.isProjection) {
+                            handleChartPointClick(periodVal, src.id);
+                          }
                         }}
                       />
                     ))}
+
+                    {showProjection && projection?.available && (
+                      <Bar
+                        dataKey={(row: ChartPeriodRow) =>
+                          row.isProjection ? row.projEstimate : undefined
+                        }
+                        name="Consensus Projection"
+                        fill="#1E3A8A"
+                        fillOpacity={0.22}
+                        stroke="#1E3A8A"
+                        strokeWidth={1.5}
+                        strokeDasharray="4 2"
+                        radius={[2, 2, 0, 0]}
+                        maxBarSize={28}
+                        isAnimationActive={false}
+                      />
+                    )}
                   </BarChart>
                 )}
               </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Optional Trend Projection Diagnostics Strip */}
+          {showProjection && projection && (
+            <div className="mt-4 rounded-md border border-[#E2E8F0] bg-[#FAFAFA] px-4 py-3.5">
+              {projection.available && projection.summary ? (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 lg:divide-x lg:divide-[#E2E8F0]">
+                    <div className="lg:pr-4">
+                      <div className="text-[11px] font-medium text-[#64748B]">
+                        Next Projected ({projection.summary.nextPoint.label})
+                      </div>
+                      <div className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[#1E3A8A]">
+                        ~{formatNumber(projection.summary.nextPoint.estimate)} births
+                      </div>
+                      <div className="font-mono text-[11px] tabular-nums text-[#64748B]">
+                        95% CI: {formatNumber(projection.summary.nextPoint.low)} –{' '}
+                        {formatNumber(projection.summary.nextPoint.high)}
+                      </div>
+                    </div>
+
+                    <div className="lg:px-4">
+                      <div className="text-[11px] font-medium text-[#64748B]">
+                        Projected +{projection.summary.horizonSteps}{' '}
+                        {projection.summary.unitLabel}
+                        {projection.summary.horizonSteps === 1 ? '' : 's'} Total
+                      </div>
+                      <div className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[#0F172A]">
+                        ~{formatNumber(projection.summary.cumulativeEstimate)} births
+                      </div>
+                      <div className="font-mono text-[11px] tabular-nums text-[#64748B]">
+                        Range: {formatNumber(projection.summary.cumulativeLow)} –{' '}
+                        {formatNumber(projection.summary.cumulativeHigh)}
+                      </div>
+                    </div>
+
+                    <div className="lg:px-4">
+                      <div className="text-[11px] font-medium text-[#64748B]">
+                        Linear Trend Slope
+                      </div>
+                      <div
+                        className={cn(
+                          'mt-0.5 font-mono text-sm font-semibold tabular-nums',
+                          projection.summary.slopePerPeriod >= 0
+                            ? 'text-[#15803D]'
+                            : 'text-[#B45309]'
+                        )}
+                      >
+                        {projection.summary.slopePerPeriod >= 0 ? '+' : ''}
+                        {projection.summary.slopePerPeriod.toFixed(1)} /{' '}
+                        {projection.summary.unitLabel}
+                      </div>
+                      <div className="text-[11px] text-[#64748B]">
+                        OLS fit on active source median
+                      </div>
+                    </div>
+
+                    <div className="lg:pl-4">
+                      <div className="text-[11px] font-medium text-[#64748B]">Model Fit</div>
+                      <div className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[#0F172A]">
+                        R² = {projection.summary.rSquared.toFixed(2)}
+                      </div>
+                      <div className="font-mono text-[11px] tabular-nums text-[#64748B]">
+                        Based on {projection.summary.sampleSize} observed{' '}
+                        {projection.summary.unitLabel}s
+                      </div>
+                    </div>
+                  </div>
+
+                  <p className="border-t border-[#E2E8F0] pt-2 text-[11px] leading-relaxed text-[#64748B]">
+                    Optional statistical estimate: linear extrapolation extends the recent
+                    historical trajectory and widens uncertainty over longer horizons; it does not
+                    predict sudden displacement, facility closures, or reporting disruptions.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-[#475569]">{projection.unavailableReason}</p>
+              )}
             </div>
           )}
 
@@ -656,6 +1062,9 @@ export function AnalyticsView({
             </span>
             <span className="font-mono tabular-nums">
               {filteredReports.length} plotted observations
+              {showProjection && projection?.available
+                ? ` · +${projection.points.length} projected`
+                : ''}
             </span>
           </div>
         </div>
