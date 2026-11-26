@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart2,
   BookOpen,
+  Check,
+  Download,
   Grid3X3,
   Inbox,
   LogIn,
@@ -23,6 +25,7 @@ import { SourceInspectorDrawer } from './components/SourceInspectorDrawer';
 import { SourcesDirectoryView } from './components/SourcesDirectoryView';
 import { useAuth } from './context/AuthContext';
 import { analyzeDiscrepancies } from './lib/discrepancy-engine';
+import { exportFullRepositoryToCsv } from './lib/repository-export';
 import { cn } from './lib/utils';
 import type {
   BirthReportRecord,
@@ -77,6 +80,16 @@ export default function App() {
   const [explorerSourceFilter, setExplorerSourceFilter] = useState<number | null>(null);
   const [explorerSearchQuery, setExplorerSearchQuery] = useState('');
   const [explorerSearchNonce, setExplorerSearchNonce] = useState(0);
+  const [exportConfirmed, setExportConfirmed] = useState(false);
+  const exportTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (exportTimerRef.current !== null) {
+        window.clearTimeout(exportTimerRef.current);
+      }
+    };
+  }, []);
 
   const fetchPublicData = useCallback(async () => {
     setLoadError(null);
@@ -181,6 +194,19 @@ export default function App() {
     setExplorerSearchQuery(query);
     setExplorerSearchNonce((n) => n + 1);
     setActiveTab('explorer');
+  };
+
+  const handleExportRepository = () => {
+    if (reports.length === 0) return;
+    exportFullRepositoryToCsv(reports, sources, revisions);
+    setExportConfirmed(true);
+    if (exportTimerRef.current !== null) {
+      window.clearTimeout(exportTimerRef.current);
+    }
+    exportTimerRef.current = window.setTimeout(() => {
+      setExportConfirmed(false);
+      exportTimerRef.current = null;
+    }, 2500);
   };
 
   const handleSourceDeleted = useCallback(
@@ -414,13 +440,34 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex flex-1 items-center justify-end gap-3 min-w-0">
+          <div className="flex flex-1 items-center justify-end gap-2.5 sm:gap-3 min-w-0">
             <HeaderReportSearch
               reports={reports}
               loading={loading}
               onSelectReport={(id) => setInspectedReportId(id)}
               onViewAllInExplorer={handleHeaderSearchToExplorer}
             />
+
+            <button
+              type="button"
+              onClick={handleExportRepository}
+              disabled={loading || reports.length === 0}
+              title={`Download all ${reports.length} birth records as a structured CSV`}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] transition-colors hover:bg-[#F8FAFC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {exportConfirmed ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-[#15803D]" />
+                  <span>Exported</span>
+                </>
+              ) : (
+                <>
+                  <Download className="h-3.5 w-3.5 text-[#1E3A8A]" />
+                  <span className="hidden sm:inline">Export Data</span>
+                  <span className="sm:hidden">CSV</span>
+                </>
+              )}
+            </button>
 
             {isOwner && (
               <button
