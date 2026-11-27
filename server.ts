@@ -33,6 +33,11 @@ import {
   GeminiInsightsError,
   generateDiscrepancyInsightsWithGemini,
 } from './src/services/gemini-insights.ts';
+import {
+  checkVerificationRateLimit,
+  SourceVerificationError,
+  verifyReportWithSearchGrounding,
+} from './src/services/gemini-source-verify.ts';
 import { SCRAPER_CRON_TEMPLATE } from './src/services/scraper-template.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -162,6 +167,10 @@ const createContextMarkerSchema = z.object({
 const discrepancyInsightsSchema = z.object({
   periodScope: z.enum(['All', 'Monthly', 'Yearly']).optional().default('Monthly'),
   windowCount: z.coerce.number().int().min(3).max(12).optional().default(6),
+  forceRefresh: z.boolean().optional().default(false),
+});
+
+const verifyReportSearchSchema = z.object({
   forceRefresh: z.boolean().optional().default(false),
 });
 
@@ -672,6 +681,51 @@ async function startServer() {
           : 'Failed to generate AI discrepancy insights.';
       const status = message.includes('No flagged discrepancy reports') ? 404 : 500;
       return res.status(status).json({ error: message });
+    }
+  });
+
+  // Source Inspector: External URL Reachability Probe + Gemini Google Search Grounding
+  app.post('/api/reports/:id/verify-search', async (req: Request, res: Response) => {
+    const reportId = Number(req.params.id);
+    if (!Number.isInteger(reportId) || reportId <= 0) {
+      return res.status(400).json({ error: 'Invalid report identifier.' });
+    }
+
+    const parsed = verifyReportSearchSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid verification payload.',
+      });
+    }
+
+    const clientKey = req.ip || 'unknown';
+    if (!checkVerificationRateLimit(clientKey)) {
+      return res.status(429).json({
+        error: 'Too many live web verifications in a short period. Please wait a minute and try again.',
+      });
+    }
+
+    try {
+      const report = await getReportWithRevisions(reportId);
+      if (!report) {
+        return res.status(404).json({ error: 'Report not found.' });
+      }
+
+      const result = await verifyReportWithSearchGrounding(report, {
+        forceRefresh: parsed.data.forceRefresh,
+      });
+
+      return res.json(result);
+    } catch (error: unknown) {
+      console.error('Source search verification error:', error);
+      if (error instanceof SourceVerificationError) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Failed to verify source URL and retrieve live search context.';
+      return res.status(500).json({ error: message });
     }
   });
 

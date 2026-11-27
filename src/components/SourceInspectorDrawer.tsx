@@ -1,12 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
+  AlertTriangle,
   ArrowRight,
   Check,
+  CheckCircle2,
   Copy,
   ExternalLink,
+  Globe,
   History,
   PenLine,
   Quote,
+  RefreshCw,
+  Search,
+  ShieldAlert,
   X,
 } from 'lucide-react';
 import { formatReportCitation, type CitationFormat } from '../lib/citations';
@@ -21,6 +28,50 @@ import {
 } from '../lib/utils';
 import type { BirthReportRecord, ReportDetailRecord } from '../types/observatory';
 
+type UrlHealthStatus =
+  | 'live'
+  | 'redirected'
+  | 'restricted'
+  | 'broken'
+  | 'unreachable'
+  | 'archival_placeholder';
+
+interface UrlCheckResult {
+  originalUrl: string;
+  finalUrl: string;
+  status: UrlHealthStatus;
+  statusCode: number | null;
+  reachable: boolean;
+  redirected: boolean;
+  latencyMs: number;
+  note: string;
+  checkedAt: string;
+}
+
+interface GroundedWebSource {
+  title: string;
+  uri: string;
+  domain: string;
+}
+
+interface SourceSearchVerificationResponse {
+  reportId: number;
+  urlCheck: UrlCheckResult;
+  grounding: {
+    urlVerificationSummary: string;
+    realtimeContext: string;
+    searchQueries: string[];
+    sources: GroundedWebSource[];
+    generatedAt: string;
+    model: string;
+  } | null;
+  groundingError?: {
+    status: number;
+    message: string;
+  } | null;
+  cached: boolean;
+}
+
 interface SourceInspectorDrawerProps {
   reportId: number | null;
   isOwner: boolean;
@@ -28,6 +79,28 @@ interface SourceInspectorDrawerProps {
   onClose: () => void;
   onSelectReportId: (id: number) => void;
   onRequestOverride: (report: BirthReportRecord) => void;
+}
+
+function getUrlStatusMeta(status: UrlHealthStatus): {
+  label: string;
+  textClass: string;
+  icon: 'ok' | 'warn' | 'err' | 'neutral';
+} {
+  switch (status) {
+    case 'live':
+      return { label: 'Live', textClass: 'text-[#15803D]', icon: 'ok' };
+    case 'redirected':
+      return { label: 'Redirected', textClass: 'text-[#0F766E]', icon: 'ok' };
+    case 'restricted':
+      return { label: 'Restricted Access', textClass: 'text-[#B45309]', icon: 'warn' };
+    case 'broken':
+      return { label: 'Broken / Missing', textClass: 'text-[#B91C1C]', icon: 'err' };
+    case 'unreachable':
+      return { label: 'Unreachable', textClass: 'text-[#B91C1C]', icon: 'err' };
+    case 'archival_placeholder':
+    default:
+      return { label: 'Archival Placeholder', textClass: 'text-[#64748B]', icon: 'neutral' };
+  }
 }
 
 export function SourceInspectorDrawer({
@@ -43,6 +116,16 @@ export function SourceInspectorDrawer({
   const [error, setError] = useState<string | null>(null);
   const [citationFormat, setCitationFormat] = useState<CitationFormat>('apa');
   const [citationCopied, setCitationCopied] = useState(false);
+
+  // Per-report live URL & Google Search grounding cache during drawer session
+  const [verificationsByReport, setVerificationsByReport] = useState<
+    Record<number, SourceSearchVerificationResponse>
+  >({});
+  const [verifying, setVerifying] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const verifyReqCounterRef = useRef(0);
+
+  const activeVerification = reportId ? verificationsByReport[reportId] ?? null : null;
 
   const formattedCitation = useMemo(
     () => (detail ? formatReportCitation(detail, citationFormat) : ''),
@@ -60,7 +143,53 @@ export function SourceInspectorDrawer({
     }
   };
 
+  const handleRunVerification = async (forceRefresh = false) => {
+    if (!reportId) return;
+    const targetReportId = reportId;
+    const reqId = ++verifyReqCounterRef.current;
+    setVerifying(true);
+    setVerifyError(null);
+
+    try {
+      const res = await fetch(`/api/reports/${targetReportId}/verify-search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ forceRefresh }),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (reqId !== verifyReqCounterRef.current) return;
+
+      if (!res.ok) {
+        throw new Error(
+          data?.error || `Failed to verify URL and fetch search context (HTTP ${res.status}).`
+        );
+      }
+
+      setVerificationsByReport((prev) => ({
+        ...prev,
+        [targetReportId]: data as SourceSearchVerificationResponse,
+      }));
+    } catch (err: unknown) {
+      if (reqId !== verifyReqCounterRef.current) return;
+      setVerifyError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to complete live URL and Google Search verification.'
+      );
+    } finally {
+      if (reqId === verifyReqCounterRef.current) {
+        setVerifying(false);
+      }
+    }
+  };
+
   useEffect(() => {
+    // Cancel any in-flight verification UI update when switching reports
+    verifyReqCounterRef.current += 1;
+    setVerifying(false);
+    setVerifyError(null);
+
     if (!reportId) {
       setDetail(null);
       return;
@@ -97,6 +226,10 @@ export function SourceInspectorDrawer({
 
   if (!reportId) return null;
 
+  const urlStatusMeta = activeVerification
+    ? getUrlStatusMeta(activeVerification.urlCheck.status)
+    : null;
+
   return (
     <div
       className="fixed inset-0 z-50 flex justify-end bg-[#0F172A]/25 transition-opacity"
@@ -106,14 +239,14 @@ export function SourceInspectorDrawer({
       onClick={onClose}
     >
       <aside
-        className="flex h-full w-full max-w-[540px] flex-col border-l border-[#CBD5E1] bg-white shadow-xl"
+        className="flex h-full w-full max-w-[560px] flex-col border-l border-[#CBD5E1] bg-white shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Drawer Header */}
         <div className="flex items-start justify-between gap-4 border-b border-[#E2E8F0] px-6 py-4">
           <div>
             <div className="text-xs text-[#64748B]">
-              Source Provenance & Revision Inspector
+              Source Provenance &amp; Revision Inspector
             </div>
             <h2 className="mt-0.5 font-serif text-xl font-semibold text-[#0F172A]">
               {detail
@@ -209,25 +342,273 @@ export function SourceInspectorDrawer({
                   </div>
                   <div className="grid grid-cols-3 gap-2 py-2.5">
                     <dt className="text-[#64748B]">Source Link</dt>
-                    <dd className="col-span-2 truncate">
-                      {isSafeHttpUrl(detail.sourceUrl) ? (
-                        <a
-                          href={detail.sourceUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 font-mono text-[11px] text-[#1E3A8A] hover:underline"
-                        >
-                          <span className="truncate">{detail.sourceUrl}</span>
-                          <ExternalLink className="h-3 w-3 shrink-0" />
-                        </a>
-                      ) : (
-                        <span className="font-mono text-[11px] text-[#64748B]">
-                          {detail.sourceUrl}
-                        </span>
+                    <dd className="col-span-2 min-w-0 space-y-1">
+                      <div className="truncate">
+                        {isSafeHttpUrl(detail.sourceUrl) ? (
+                          <a
+                            href={detail.sourceUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex max-w-full items-center gap-1 font-mono text-[11px] text-[#1E3A8A] hover:underline"
+                          >
+                            <span className="truncate">{detail.sourceUrl}</span>
+                            <ExternalLink className="h-3 w-3 shrink-0" />
+                          </a>
+                        ) : (
+                          <span className="font-mono text-[11px] text-[#64748B]">
+                            {detail.sourceUrl}
+                          </span>
+                        )}
+                      </div>
+                      {activeVerification && urlStatusMeta && (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                          <span className={cn('font-medium', urlStatusMeta.textClass)}>
+                            {urlStatusMeta.label}
+                          </span>
+                          {activeVerification.urlCheck.statusCode !== null && (
+                            <span className="font-mono text-[#64748B]">
+                              HTTP {activeVerification.urlCheck.statusCode}
+                            </span>
+                          )}
+                          {activeVerification.urlCheck.latencyMs > 0 && (
+                            <span className="font-mono text-[#64748B]">
+                              · {formatNumber(activeVerification.urlCheck.latencyMs)}ms
+                            </span>
+                          )}
+                        </div>
                       )}
                     </dd>
                   </div>
                 </dl>
+              </div>
+
+              {/* Live URL Verification & Google Search Grounding */}
+              <div className="rounded-md border border-[#E2E8F0] bg-white">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] bg-[#FAFAFA] px-4 py-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Globe className="h-3.5 w-3.5 shrink-0 text-[#1E3A8A]" />
+                    <h3 className="text-xs font-semibold text-[#0F172A]">
+                      Live URL Check &amp; Search Grounding
+                    </h3>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={verifying}
+                    onClick={() => handleRunVerification(Boolean(activeVerification))}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60',
+                      activeVerification
+                        ? 'border border-[#CBD5E1] bg-white text-[#0F172A] hover:bg-[#F8FAFC]'
+                        : 'bg-[#1E3A8A] text-white hover:bg-[#172D6B]'
+                    )}
+                  >
+                    {verifying ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>Verifying...</span>
+                      </>
+                    ) : activeVerification ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 text-[#1E3A8A]" />
+                        <span>Re-verify</span>
+                      </>
+                    ) : (
+                      <>
+                        <Search className="h-3.5 w-3.5" />
+                        <span>Verify URL &amp; Context</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="p-4 space-y-4">
+                  {!activeVerification && !verifying && !verifyError && (
+                    <p className="text-xs leading-relaxed text-[#475569]">
+                      Probe the external publication URL for live reachability and query Google
+                      Search grounding to retrieve real-time corroboration and demographic context
+                      for {detail.sourceName} ({formatPeriodLabel(detail.periodValue)}).
+                    </p>
+                  )}
+
+                  {verifying && !activeVerification && (
+                    <div className="space-y-2.5">
+                      <div className="h-3 w-3/4 animate-pulse rounded bg-[#F1F5F9]" />
+                      <div className="h-3 w-full animate-pulse rounded bg-[#F1F5F9]" />
+                      <div className="h-3 w-5/6 animate-pulse rounded bg-[#F1F5F9]" />
+                      <div className="pt-1 text-[11px] text-[#64748B]">
+                        Checking external link status and querying Google Search grounding...
+                      </div>
+                    </div>
+                  )}
+
+                  {verifyError && (
+                    <div className="flex items-start justify-between gap-3 rounded-md border border-[#FECACA] bg-[#FEF2F2] p-3 text-xs text-[#991B1B]">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>{verifyError}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleRunVerification(true)}
+                        className="rounded border border-[#FCA5A5] bg-white px-2.5 py-1 text-[11px] font-medium text-[#991B1B] hover:bg-[#FEF2F2] whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+
+                  {activeVerification && urlStatusMeta && (
+                    <div className={cn('space-y-4 transition-opacity', verifying && 'opacity-60')}>
+                      {/* 1. Direct URL Probe Status */}
+                      <div className="rounded-md border border-[#E2E8F0] bg-[#FAFAFA] p-3 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="inline-flex items-center gap-1.5 font-semibold">
+                            {urlStatusMeta.icon === 'ok' ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 text-[#15803D]" />
+                            ) : urlStatusMeta.icon === 'warn' ? (
+                              <AlertTriangle className="h-3.5 w-3.5 text-[#B45309]" />
+                            ) : urlStatusMeta.icon === 'err' ? (
+                              <ShieldAlert className="h-3.5 w-3.5 text-[#B91C1C]" />
+                            ) : (
+                              <Globe className="h-3.5 w-3.5 text-[#64748B]" />
+                            )}
+                            <span className={urlStatusMeta.textClass}>
+                              URL Status: {urlStatusMeta.label}
+                            </span>
+                          </div>
+
+                          <div className="font-mono text-[11px] tabular-nums text-[#64748B]">
+                            {activeVerification.urlCheck.statusCode !== null
+                              ? `HTTP ${activeVerification.urlCheck.statusCode}`
+                              : 'No HTTP code'}
+                            {activeVerification.urlCheck.latencyMs > 0
+                              ? ` · ${formatNumber(activeVerification.urlCheck.latencyMs)}ms`
+                              : ''}
+                          </div>
+                        </div>
+
+                        <p className="mt-1.5 leading-relaxed text-[#334155]">
+                          {activeVerification.urlCheck.note}
+                        </p>
+
+                        {activeVerification.urlCheck.redirected &&
+                          isSafeHttpUrl(activeVerification.urlCheck.finalUrl) && (
+                            <div className="mt-1.5 truncate text-[11px] text-[#475569]">
+                              Resolved to:{' '}
+                              <a
+                                href={activeVerification.urlCheck.finalUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono text-[#1E3A8A] hover:underline"
+                              >
+                                {activeVerification.urlCheck.finalUrl}
+                              </a>
+                            </div>
+                          )}
+                      </div>
+
+                      {/* 2. Search-Grounded URL Corroboration & Real-Time Context */}
+                      {activeVerification.grounding ? (
+                        <>
+                          <div className="space-y-3 border-l-2 border-[#1E3A8A] pl-3.5 text-xs">
+                            <div>
+                              <div className="text-[11px] font-semibold uppercase tracking-wide text-[#475569]">
+                                Web Corroboration
+                              </div>
+                              <p className="mt-1 leading-relaxed text-[#0F172A]">
+                                {activeVerification.grounding.urlVerificationSummary}
+                              </p>
+                            </div>
+
+                            <div>
+                              <div className="text-[11px] font-semibold uppercase tracking-wide text-[#475569]">
+                                Real-Time Context
+                              </div>
+                              <p className="mt-1 leading-relaxed text-[#0F172A]">
+                                {activeVerification.grounding.realtimeContext}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* 3. Grounded Web Sources (from Google Search groundingChunks) */}
+                          <div>
+                            <div className="flex items-center justify-between text-[11px] font-semibold text-[#475569]">
+                              <span>
+                                Google Search Sources ({activeVerification.grounding.sources.length})
+                              </span>
+                              <span className="font-mono font-normal text-[#64748B]">
+                                Checked {formatDateTime(activeVerification.grounding.generatedAt)}
+                              </span>
+                            </div>
+
+                            {activeVerification.grounding.sources.length > 0 ? (
+                              <ul className="mt-2 divide-y divide-[#F1F5F9] rounded-md border border-[#E2E8F0]">
+                                {activeVerification.grounding.sources
+                                  .filter((s) => isSafeHttpUrl(s.uri))
+                                  .map((src) => (
+                                    <li key={src.uri}>
+                                      <a
+                                        href={src.uri}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="flex items-center justify-between gap-2 px-3 py-2 text-xs transition-colors hover:bg-[#F8FAFC]"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="truncate font-medium text-[#1E3A8A] hover:underline">
+                                            {src.title}
+                                          </div>
+                                          <div className="truncate font-mono text-[10px] text-[#64748B]">
+                                            {src.domain}
+                                          </div>
+                                        </div>
+                                        <ExternalLink className="h-3 w-3 shrink-0 text-[#64748B]" />
+                                      </a>
+                                    </li>
+                                  ))}
+                              </ul>
+                            ) : (
+                              <p className="mt-1.5 text-[11px] text-[#64748B]">
+                                No direct web links were returned in search grounding metadata for
+                                this query.
+                              </p>
+                            )}
+
+                            {activeVerification.grounding.searchQueries.length > 0 && (
+                              <div className="mt-2.5 text-[11px] text-[#64748B]">
+                                <span className="font-medium text-[#475569]">Search queries: </span>
+                                <span className="font-mono">
+                                  {activeVerification.grounding.searchQueries.join(' · ')}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      ) : activeVerification.groundingError ? (
+                        <div className="flex items-start justify-between gap-3 rounded-md border border-[#FDE68A] bg-[#FFFBEB] p-3 text-xs text-[#92400E]">
+                          <div className="flex items-start gap-2">
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                            <div>
+                              <div className="font-medium">
+                                Google Search Grounding Temporarily Unavailable
+                              </div>
+                              <div className="mt-0.5 leading-relaxed">
+                                {activeVerification.groundingError.message}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRunVerification(true)}
+                            className="rounded border border-[#FCD34D] bg-white px-2.5 py-1 text-[11px] font-medium text-[#92400E] hover:bg-[#FEF3C7] whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Citation Generator (APA / Chicago / BibTeX) */}
@@ -357,7 +738,7 @@ export function SourceInspectorDrawer({
                 <div className="flex items-center justify-between">
                   <h3 className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0F172A]">
                     <History className="h-3.5 w-3.5 text-[#1E3A8A]" />
-                    Revision History & Diff Log
+                    Revision History &amp; Diff Log
                   </h3>
                   <span className="font-mono text-[11px] text-[#64748B]">
                     {detail.revisions.length}{' '}
