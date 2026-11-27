@@ -23,6 +23,7 @@ import {
   isSafeHttpUrl,
 } from '../lib/utils';
 import type { BirthReportRecord, PeriodType } from '../types/observatory';
+import { AiDiscrepancyInsightsWidget } from './AiDiscrepancyInsightsWidget';
 
 interface DiscrepancyReportViewProps {
   reports: BirthReportRecord[];
@@ -273,6 +274,14 @@ export function DiscrepancyReportView({
           </div>
         </div>
       </section>
+
+      {/* AI Insights: Gemini 3-Sentence Executive Summary of Recent Discrepancies */}
+      <AiDiscrepancyInsightsWidget
+        periodScope={periodTypeFilter}
+        reportsLoaded={!loading}
+        reportCount={reports.length}
+        onInspectReport={onInspectReport}
+      />
 
       {/* Filter & Prioritization Toolbar */}
       <section className="rounded-lg border border-[#E2E8F0] bg-white p-4 space-y-3">

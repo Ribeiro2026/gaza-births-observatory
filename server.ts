@@ -28,6 +28,11 @@ import {
   extractBirthStatsWithGemini,
   fetchPublicUrlContent,
 } from './src/services/gemini-extractor.ts';
+import {
+  checkRefreshRateLimit,
+  GeminiInsightsError,
+  generateDiscrepancyInsightsWithGemini,
+} from './src/services/gemini-insights.ts';
 import { SCRAPER_CRON_TEMPLATE } from './src/services/scraper-template.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -152,6 +157,12 @@ const createContextMarkerSchema = z.object({
   title: z.string().min(2).max(80),
   category: z.enum(['Disruption', 'Methodology', 'Reporting Shift', 'Milestone']),
   notes: z.string().max(400).optional(),
+});
+
+const discrepancyInsightsSchema = z.object({
+  periodScope: z.enum(['All', 'Monthly', 'Yearly']).optional().default('Monthly'),
+  windowCount: z.coerce.number().int().min(3).max(12).optional().default(6),
+  forceRefresh: z.boolean().optional().default(false),
 });
 
 function parseDateSafe(input: string): Date {
@@ -616,6 +627,53 @@ async function startServer() {
       }
     }
   );
+
+  // AI Insights: 3-Sentence Executive Summary of Recent Discrepancy Reports (Cached Server-Side)
+  app.post('/api/ai/discrepancy-insights', async (req: Request, res: Response) => {
+    const parsed = discrepancyInsightsSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid discrepancy insights request.',
+      });
+    }
+
+    if (parsed.data.forceRefresh) {
+      const clientKey = req.ip || 'unknown';
+      if (!checkRefreshRateLimit(clientKey)) {
+        return res.status(429).json({
+          error: 'Too many manual refreshes in a short period. Please wait a minute and try again.',
+        });
+      }
+    }
+
+    try {
+      const [rawReports, rawRevisions] = await Promise.all([
+        listReports({}),
+        listRecentRevisions(),
+      ]);
+
+      const insights = await generateDiscrepancyInsightsWithGemini({
+        rawReports,
+        rawRevisions,
+        periodScope: parsed.data.periodScope,
+        windowCount: parsed.data.windowCount,
+        forceRefresh: parsed.data.forceRefresh,
+      });
+
+      return res.json(insights);
+    } catch (error: unknown) {
+      console.error('AI discrepancy insights error:', error);
+      if (error instanceof GeminiInsightsError) {
+        return res.status(error.statusCode).json({ error: error.message });
+      }
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Failed to generate AI discrepancy insights.';
+      const status = message.includes('No flagged discrepancy reports') ? 404 : 500;
+      return res.status(status).json({ error: message });
+    }
+  });
 
   app.get('/api/ingest/template', requireOwnerAuth, (_req: AuthRequest, res: Response) => {
     res.json({

@@ -37,6 +37,7 @@ import type {
   RevisionLogRecord,
   SourceRecord,
 } from '../types/observatory';
+import { AiDiscrepancyInsightsWidget } from './AiDiscrepancyInsightsWidget';
 import { BirthHeatmapsPanel } from './BirthHeatmapsPanel';
 import { TierChartPanel, type ConfidenceScope } from './TierChartPanel';
 
@@ -952,6 +953,15 @@ export function AnalyticsView({
           )}
         </div>
       </section>
+
+      {/* AI Insights: Gemini 3-Sentence Executive Summary of Recent Discrepancies */}
+      <AiDiscrepancyInsightsWidget
+        periodScope={periodType}
+        reportsLoaded={!loading}
+        reportCount={reports.length}
+        onInspectReport={onInspectReport}
+        onOpenDiscrepancyReport={() => onNavigateTab('discrepancies')}
+      />
 
       {/* Tier 1 Primary vs. Tier 2 Multilateral Systemic Divergence Benchmark */}
       <section className="rounded-lg border border-[#E2E8F0] bg-white">
