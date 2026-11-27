@@ -1,13 +1,21 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowUpDown,
+  Check,
+  Download,
   ExternalLink,
   History,
+  Link2,
   PenLine,
   Plus,
   RotateCcw,
   Search,
 } from 'lucide-react';
+import {
+  exportFilteredReportsToCsv,
+  exportFilteredReportsToJson,
+} from '../lib/repository-export';
+import type { ExplorerUrlState } from '../lib/url-state';
 import {
   cn,
   formatDateShort,
@@ -20,6 +28,7 @@ import type {
   BirthReportRecord,
   ConfidenceStatus,
   PeriodType,
+  RevisionLogRecord,
   SourceRecord,
   SourceType,
 } from '../types/observatory';
@@ -29,11 +38,15 @@ import { matchesReportQuery } from './HeaderReportSearch';
 interface DataExplorerViewProps {
   reports: BirthReportRecord[];
   sources: SourceRecord[];
+  revisions: RevisionLogRecord[];
   isOwner: boolean;
   loading: boolean;
+  initialUrlState?: ExplorerUrlState;
   initialSourceId?: number | null;
   initialSearchQuery?: string;
   searchSyncNonce?: number;
+  onFiltersChange?: (state: ExplorerUrlState) => void;
+  onCopyViewLink?: () => void;
   onClearInitialSource?: () => void;
   onClearInitialSearch?: () => void;
   onInspectReport: (reportId: number) => void;
@@ -61,40 +74,66 @@ const MONTHS = [
 export function DataExplorerView({
   reports,
   sources,
+  revisions,
   isOwner,
   loading,
+  initialUrlState,
   initialSourceId,
   initialSearchQuery,
   searchSyncNonce,
+  onFiltersChange,
+  onCopyViewLink,
   onClearInitialSource,
   onClearInitialSearch,
   onInspectReport,
   onOpenNewReport,
   onOpenOverride,
 }: DataExplorerViewProps) {
-  const [search, setSearch] = useState(initialSearchQuery || '');
-  const [periodType, setPeriodType] = useState<'All' | PeriodType>('All');
-  const [year, setYear] = useState('All');
-  const [month, setMonth] = useState('All');
-  const [sourceType, setSourceType] = useState<'All' | SourceType>('All');
-  const [sourceId, setSourceId] = useState<string>(
-    initialSourceId ? String(initialSourceId) : 'All'
+  const [search, setSearch] = useState(
+    initialSearchQuery || initialUrlState?.search || ''
   );
-  const [status, setStatus] = useState<'All' | ConfidenceStatus>('All');
+  const [periodType, setPeriodType] = useState<'All' | PeriodType>(
+    initialUrlState?.periodType || 'All'
+  );
+  const [year, setYear] = useState(initialUrlState?.year || 'All');
+  const [month, setMonth] = useState(initialUrlState?.month || 'All');
+  const [sourceType, setSourceType] = useState<'All' | SourceType>(
+    initialUrlState?.sourceType || 'All'
+  );
+  const [sourceId, setSourceId] = useState<string>(
+    initialSourceId ? String(initialSourceId) : initialUrlState?.sourceId || 'All'
+  );
+  const [status, setStatus] = useState<'All' | ConfidenceStatus>(
+    initialUrlState?.status || 'All'
+  );
   const [publishedFrom, setPublishedFrom] = useState('');
   const [publishedTo, setPublishedTo] = useState('');
   const [sortField, setSortField] = useState<SortField>('periodValue');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Sync explorer filter changes up for shareable URL parameters
+  useEffect(() => {
+    onFiltersChange?.({
+      search,
+      periodType,
+      year,
+      month,
+      sourceType,
+      sourceId,
+      status,
+    });
+  }, [search, periodType, year, month, sourceType, sourceId, status, onFiltersChange]);
 
   // Keep source filter synchronized when clicking from Sources directory
-  React.useEffect(() => {
+  useEffect(() => {
     if (initialSourceId) {
       setSourceId(String(initialSourceId));
     }
   }, [initialSourceId]);
 
   // Synchronize search query when submitted from the global header search bar
-  React.useEffect(() => {
+  useEffect(() => {
     if (searchSyncNonce && initialSearchQuery !== undefined) {
       setSearch(initialSearchQuery);
       setSourceId('All');
@@ -213,16 +252,74 @@ export function DataExplorerView({
           </p>
         </div>
 
-        {isOwner && (
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={onOpenNewReport}
-            className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 whitespace-nowrap shrink-0 cursor-pointer"
+            disabled={filtered.length === 0}
+            onClick={() => exportFilteredReportsToCsv(filtered, sources, revisions)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] transition-colors hover:bg-[#F8FAFC] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <Plus className="h-3.5 w-3.5" />
-            Log Manual Report
+            <Download className="h-3.5 w-3.5 text-[#1E3A8A]" />
+            Export Filtered CSV ({formatNumber(filtered.length)})
           </button>
-        )}
+
+          <button
+            type="button"
+            disabled={filtered.length === 0}
+            onClick={() =>
+              exportFilteredReportsToJson(filtered, sources, {
+                search: search || 'None',
+                periodType,
+                year,
+                month,
+                sourceType,
+                sourceId,
+                status,
+                publishedFrom: publishedFrom || 'None',
+                publishedTo: publishedTo || 'None',
+              })
+            }
+            className="inline-flex items-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] transition-colors hover:bg-[#F8FAFC] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Download className="h-3.5 w-3.5 text-[#475569]" />
+            Export JSON
+          </button>
+
+          {onCopyViewLink && (
+            <button
+              type="button"
+              onClick={() => {
+                onCopyViewLink();
+                setLinkCopied(true);
+                setTimeout(() => setLinkCopied(false), 2000);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-2 text-xs font-medium text-[#475569] transition-colors hover:bg-[#F8FAFC] hover:text-[#0F172A] whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {linkCopied ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-[#15803D]" />
+                  Link Copied
+                </>
+              ) : (
+                <>
+                  <Link2 className="h-3.5 w-3.5" />
+                  Copy Link
+                </>
+              )}
+            </button>
+          )}
+
+          {isOwner && (
+            <button
+              type="button"
+              onClick={onOpenNewReport}
+              className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#172D6B] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Log Manual Report
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Multi-Facet Filter Bar */}

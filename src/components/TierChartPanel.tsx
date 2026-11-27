@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 import { Download, X } from 'lucide-react';
 import { exportChartToPng } from '../lib/chart-export';
+import { getMarkerStrokeColor } from '../lib/context-markers';
 import { computeLinearTrendProjection } from '../lib/trend-projection';
 import {
   cn,
@@ -23,6 +24,7 @@ import {
 } from '../lib/utils';
 import type {
   BirthReportRecord,
+  ContextMarkerRecord,
   CredibilityTier,
   PeriodType,
   SourceRecord,
@@ -58,6 +60,9 @@ interface TierChartPanelProps {
   onToggleSource: (sourceId: number) => void;
   showProjection: boolean;
   activeHorizon: number;
+  lockedYMax?: number | null;
+  contextMarkers?: ContextMarkerRecord[];
+  showContextMarkers?: boolean;
   loading: boolean;
   onInspectReport: (reportId: number) => void;
   onResetFilters: () => void;
@@ -83,6 +88,9 @@ export function TierChartPanel({
   onToggleSource,
   showProjection,
   activeHorizon,
+  lockedYMax = null,
+  contextMarkers = [],
+  showContextMarkers = false,
   loading,
   onInspectReport,
   onResetFilters,
@@ -283,6 +291,25 @@ export function TierChartPanel({
     ? Math.max(0, displayChartData.length * 46 + 96)
     : 0;
 
+  // Match monthly historical context markers against currently plotted chart periods
+  const visibleMarkers = useMemo(() => {
+    if (!showContextMarkers || periodType !== 'Monthly' || contextMarkers.length === 0) {
+      return [];
+    }
+    const periodLabelMap = new Map<string, string>();
+    for (const row of displayChartData) {
+      if (!row.isProjection) {
+        periodLabelMap.set(row.periodValue, row.label);
+      }
+    }
+    return contextMarkers
+      .filter((m) => periodLabelMap.has(m.periodValue))
+      .map((m) => ({
+        ...m,
+        xLabel: periodLabelMap.get(m.periodValue)!,
+      }));
+  }, [showContextMarkers, periodType, contextMarkers, displayChartData]);
+
   return (
     <section className="rounded-lg border border-[#E2E8F0] bg-white">
       {/* Panel Header */}
@@ -480,6 +507,7 @@ export function TierChartPanel({
                     dy={8}
                   />
                   <YAxis
+                    domain={lockedYMax ? [0, lockedYMax] : undefined}
                     tickFormatter={(v) => formatNumber(Number(v))}
                     tick={{ fill: '#475569', fontSize: 11, fontFamily: 'IBM Plex Mono, monospace' }}
                     axisLine={false}
@@ -596,6 +624,23 @@ export function TierChartPanel({
                       );
                     }}
                   />
+
+                  {visibleMarkers.map((marker, idx) => (
+                    <ReferenceLine
+                      key={marker.id}
+                      x={marker.xLabel}
+                      stroke={getMarkerStrokeColor(marker.category)}
+                      strokeOpacity={0.65}
+                      strokeDasharray="3 3"
+                      label={{
+                        value: `M${idx + 1}`,
+                        position: 'insideTopLeft',
+                        fill: getMarkerStrokeColor(marker.category),
+                        fontSize: 10,
+                        fontFamily: 'IBM Plex Mono, monospace',
+                      }}
+                    />
+                  ))}
 
                   {showProjection && projection?.available && projection.anchorLabel && (
                     <ReferenceLine
@@ -715,6 +760,7 @@ export function TierChartPanel({
                     dy={8}
                   />
                   <YAxis
+                    domain={lockedYMax ? [0, lockedYMax] : undefined}
                     tickFormatter={(v) => formatNumber(Number(v))}
                     tick={{ fill: '#475569', fontSize: 11, fontFamily: 'IBM Plex Mono, monospace' }}
                     axisLine={false}
@@ -794,6 +840,23 @@ export function TierChartPanel({
                       );
                     }}
                   />
+
+                  {visibleMarkers.map((marker, idx) => (
+                    <ReferenceLine
+                      key={marker.id}
+                      x={marker.xLabel}
+                      stroke={getMarkerStrokeColor(marker.category)}
+                      strokeOpacity={0.65}
+                      strokeDasharray="3 3"
+                      label={{
+                        value: `M${idx + 1}`,
+                        position: 'insideTopLeft',
+                        fill: getMarkerStrokeColor(marker.category),
+                        fontSize: 10,
+                        fontFamily: 'IBM Plex Mono, monospace',
+                      }}
+                    />
+                  ))}
 
                   {showProjection && projection?.available && projection.anchorLabel && (
                     <ReferenceLine
@@ -929,10 +992,45 @@ export function TierChartPanel({
           </div>
         )}
 
+        {/* Historical Context Markers Legend (Monthly Only) */}
+        {visibleMarkers.length > 0 && (
+          <div className="mt-4 rounded-md border border-[#E2E8F0] bg-[#FAFAFA] px-4 py-3">
+            <div className="text-[11px] font-medium text-[#475569]">
+              Historical Context Milestones in View
+            </div>
+            <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
+              {visibleMarkers.map((marker, idx) => (
+                <div key={marker.id} className="text-xs leading-snug text-[#334155]">
+                  <span
+                    className="mr-1.5 font-mono text-[11px] font-semibold"
+                    style={{ color: getMarkerStrokeColor(marker.category) }}
+                  >
+                    M{idx + 1}
+                  </span>
+                  <span className="font-mono text-[11px] text-[#64748B]">
+                    {marker.xLabel}
+                  </span>
+                  <span aria-hidden="true"> · </span>
+                  <span className="font-medium text-[#0F172A]">{marker.title}</span>
+                  <span className="text-[11px] text-[#64748B]">
+                    {' '}
+                    ({marker.category}
+                    {marker.isBuiltIn ? '' : ' · Custom'})
+                  </span>
+                  {marker.notes && (
+                    <p className="mt-0.5 text-[11px] text-[#64748B]">{marker.notes}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Chart Footnote */}
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#F1F5F9] pt-3 text-xs text-[#64748B]">
           <span>{footnote}</span>
           <span className="font-mono tabular-nums">
+            {lockedYMax ? `Y-axis locked (0–${formatNumber(lockedYMax)}) · ` : ''}
             {isMonthlyBarMode && displayChartData.length > 18 ? 'Scroll horizontally to inspect all months · ' : ''}
             {filteredReports.length} plotted observation{filteredReports.length === 1 ? '' : 's'}
             {showProjection && projection?.available

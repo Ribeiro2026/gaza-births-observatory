@@ -1,8 +1,18 @@
-import React, { useEffect, useState } from 'react';
-import { ArrowRight, ExternalLink, LogIn, Plus, Trash2, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  ArrowRight,
+  ExternalLink,
+  LogIn,
+  PenLine,
+  Plus,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { formatNumber, isSafeHttpUrl } from '../lib/utils';
+import { computeSourceCoverageMap } from '../lib/source-coverage';
+import { cn, formatNumber, formatPeriodLabel, isSafeHttpUrl } from '../lib/utils';
 import type {
+  BirthReportRecord,
   CredibilityTier,
   SourceRecord,
   SourceType,
@@ -10,6 +20,7 @@ import type {
 
 interface SourcesDirectoryViewProps {
   sources: SourceRecord[];
+  reports: BirthReportRecord[];
   isOwner: boolean;
   loading: boolean;
   onRefreshAll: () => void;
@@ -30,6 +41,7 @@ const COLOR_OPTIONS = [
 
 export function SourcesDirectoryView({
   sources,
+  reports,
   isOwner,
   loading,
   onRefreshAll,
@@ -38,6 +50,7 @@ export function SourcesDirectoryView({
 }: SourcesDirectoryViewProps) {
   const { signIn, authFetch } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingSource, setEditingSource] = useState<SourceRecord | null>(null);
   const [name, setName] = useState('');
   const [type, setType] = useState<SourceType>('Multilateral Agency');
   const [urlOrHandle, setUrlOrHandle] = useState('');
@@ -53,21 +66,62 @@ export function SourcesDirectoryView({
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
+  const [expandedGapSourceIds, setExpandedGapSourceIds] = useState<number[]>([]);
+
+  const coverageMap = useMemo(
+    () => computeSourceCoverageMap(sources, reports),
+    [sources, reports]
+  );
 
   useEffect(() => {
     if (!isOwner) {
       setModalOpen(false);
+      setEditingSource(null);
       setSourceToDelete(null);
     }
   }, [isOwner]);
+
+  const openCreateModal = () => {
+    setEditingSource(null);
+    setName('');
+    setType('Multilateral Agency');
+    setUrlOrHandle('');
+    setCredibilityTier('Tier 2 - Multilateral');
+    setDescription('');
+    setSeriesColor(COLOR_OPTIONS[6]);
+    setError(null);
+    setModalOpen(true);
+  };
+
+  const openEditModal = (src: SourceRecord) => {
+    setEditingSource(src);
+    setName(src.name);
+    setType(src.type);
+    setUrlOrHandle(src.urlOrHandle);
+    setCredibilityTier(src.credibilityTier);
+    setDescription(src.description || '');
+    setSeriesColor(src.seriesColor || COLOR_OPTIONS[0]);
+    setError(null);
+    setModalOpen(true);
+  };
+
+  const toggleExpandedGaps = (sourceId: number) => {
+    setExpandedGapSourceIds((prev) =>
+      prev.includes(sourceId) ? prev.filter((id) => id !== sourceId) : [...prev, sourceId]
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSaving(true);
     try {
-      const res = await authFetch('/api/sources', {
-        method: 'POST',
+      const isEditing = Boolean(editingSource);
+      const endpoint = isEditing ? `/api/sources/${editingSource!.id}` : '/api/sources';
+      const method = isEditing ? 'PATCH' : 'POST';
+
+      const res = await authFetch(endpoint, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name,
@@ -80,16 +134,30 @@ export function SourcesDirectoryView({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Could not create source.');
+        throw new Error(
+          data.error || (isEditing ? 'Could not update source.' : 'Could not create source.')
+        );
       }
+      const savedName = name.trim();
       setName('');
       setUrlOrHandle('');
       setDescription('');
+      setEditingSource(null);
       setModalOpen(false);
-      setStatusBanner(`Registered new source "${name.trim()}".`);
+      setStatusBanner(
+        isEditing
+          ? `Updated source "${savedName}" without altering linked birth reports.`
+          : `Registered new source "${savedName}".`
+      );
       onRefreshAll();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to register source.');
+      setError(
+        err instanceof Error
+          ? err.message
+          : editingSource
+            ? 'Failed to update source.'
+            : 'Failed to register source.'
+      );
     } finally {
       setSaving(false);
     }
@@ -143,7 +211,7 @@ export function SourcesDirectoryView({
         {isOwner && (
           <button
             type="button"
-            onClick={() => setModalOpen(true)}
+            onClick={openCreateModal}
             className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -175,112 +243,195 @@ export function SourcesDirectoryView({
                 className="h-44 animate-pulse rounded-lg border border-[#E2E8F0] bg-white"
               />
             ))
-          : sources.map((src) => (
-              <article
-                key={src.id}
-                className="flex flex-col justify-between rounded-lg border border-[#E2E8F0] bg-white p-5"
-              >
-                <div>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-center gap-2.5">
-                      <span
-                        className="h-[3px] w-4 shrink-0"
-                        style={{ backgroundColor: src.seriesColor }}
-                      />
-                      <h2 className="font-serif text-lg font-semibold text-[#0F172A]">
-                        {src.name}
-                      </h2>
-                    </div>
-                    <span className="font-mono text-[11px] text-[#64748B] whitespace-nowrap">
-                      {src.credibilityTier}
-                    </span>
-                  </div>
+          : sources.map((src) => {
+              const cov = coverageMap.get(src.id);
+              const gapsExpanded = expandedGapSourceIds.includes(src.id);
+              const recencyColor =
+                cov?.recencyState === 'current'
+                  ? 'text-[#15803D]'
+                  : cov?.recencyState === 'lagging'
+                    ? 'text-[#B45309]'
+                    : cov?.recencyState === 'stale'
+                      ? 'text-[#B91C1C]'
+                      : 'text-[#64748B]';
 
-                  <div className="mt-1 text-xs text-[#64748B]">
-                    {src.type}
-                    {src.urlOrHandle && (
-                      <>
-                        {' · '}
-                        {isSafeHttpUrl(src.urlOrHandle) ? (
-                          <a
-                            href={src.urlOrHandle}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 font-mono text-[11px] text-[#1E3A8A] hover:underline"
-                          >
-                            {src.urlOrHandle.replace(/^https?:\/\//, '')}
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        ) : (
-                          <span className="font-mono text-[11px]">{src.urlOrHandle}</span>
+              return (
+                <article
+                  key={src.id}
+                  className="flex flex-col justify-between rounded-lg border border-[#E2E8F0] bg-white p-5"
+                >
+                  <div>
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-2.5">
+                        <span
+                          className="h-[3px] w-4 shrink-0"
+                          style={{ backgroundColor: src.seriesColor }}
+                        />
+                        <h2 className="font-serif text-lg font-semibold text-[#0F172A]">
+                          {src.name}
+                        </h2>
+                      </div>
+                      <span className="font-mono text-[11px] text-[#64748B] whitespace-nowrap">
+                        {src.credibilityTier}
+                      </span>
+                    </div>
+
+                    <div className="mt-1 text-xs text-[#64748B]">
+                      {src.type}
+                      {src.urlOrHandle && (
+                        <>
+                          {' · '}
+                          {isSafeHttpUrl(src.urlOrHandle) ? (
+                            <a
+                              href={src.urlOrHandle}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 font-mono text-[11px] text-[#1E3A8A] hover:underline"
+                            >
+                              {src.urlOrHandle.replace(/^https?:\/\//, '')}
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          ) : (
+                            <span className="font-mono text-[11px]">{src.urlOrHandle}</span>
+                          )}
+                        </>
+                      )}
+                    </div>
+
+                    {src.description && (
+                      <p className="mt-3 text-xs leading-relaxed text-[#475569]">
+                        {src.description}
+                      </p>
+                    )}
+
+                    {/* Coverage Completeness & Reporting Recency */}
+                    {cov && (
+                      <div className="mt-4 border-t border-[#F1F5F9] pt-3 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            <span className={cn('font-medium', recencyColor)}>
+                              {cov.recencyLabel}
+                            </span>
+                            {cov.latestMonthlyPeriod && (
+                              <>
+                                <span className="text-[#CBD5E1]" aria-hidden="true">
+                                  ·
+                                </span>
+                                <span className="text-[#475569]">
+                                  Latest:{' '}
+                                  <span className="font-mono tabular-nums text-[#0F172A]">
+                                    {formatPeriodLabel(cov.latestMonthlyPeriod)}
+                                  </span>
+                                </span>
+                              </>
+                            )}
+                          </div>
+
+                          {cov.expectedMonthlySpan > 0 && (
+                            <div className="flex items-center gap-2 font-mono text-[11px] tabular-nums text-[#475569]">
+                              <span>
+                                {cov.coveredMonthlyCount}/{cov.expectedMonthlySpan} mo covered
+                              </span>
+                              {cov.missingMonths.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleExpandedGaps(src.id)}
+                                  className="font-sans font-medium text-[#B45309] hover:underline cursor-pointer"
+                                >
+                                  {gapsExpanded
+                                    ? 'Hide gaps'
+                                    : `${cov.missingMonths.length} missing`}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {gapsExpanded && cov.missingMonths.length > 0 && (
+                          <div className="mt-2 rounded border border-[#E2E8F0] bg-[#FAFAFA] px-3 py-2 text-[11px] leading-relaxed text-[#475569]">
+                            <span className="font-medium text-[#0F172A]">
+                              Missing monthly periods ({cov.missingMonths.length}):{' '}
+                            </span>
+                            <span className="font-mono">
+                              {cov.missingMonths.slice(0, 18).join(', ')}
+                              {cov.missingMonths.length > 18
+                                ? ` +${cov.missingMonths.length - 18} more`
+                                : ''}
+                            </span>
+                          </div>
                         )}
-                      </>
+                      </div>
                     )}
                   </div>
 
-                  {src.description && (
-                    <p className="mt-3 text-xs leading-relaxed text-[#475569]">
-                      {src.description}
-                    </p>
-                  )}
-                </div>
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#F1F5F9] pt-3.5 text-xs">
+                    <div className="flex items-center gap-4 font-mono tabular-nums text-[#334155]">
+                      <span>
+                        <strong className="text-[#0F172A]">{formatNumber(src.totalReports)}</strong>{' '}
+                        <span className="font-sans text-[#64748B]">reports</span>
+                      </span>
+                      <span>
+                        <strong className="text-[#15803D]">
+                          {formatNumber(src.verifiedReports)}
+                        </strong>{' '}
+                        <span className="font-sans text-[#64748B]">verified</span>
+                      </span>
+                      <span>
+                        <strong className="text-[#0F172A]">
+                          {formatNumber(src.totalRevisions)}
+                        </strong>{' '}
+                        <span className="font-sans text-[#64748B]">revisions</span>
+                      </span>
+                    </div>
 
-                <div className="mt-5 flex items-center justify-between border-t border-[#F1F5F9] pt-3.5 text-xs">
-                  <div className="flex items-center gap-4 font-mono tabular-nums text-[#334155]">
-                    <span>
-                      <strong className="text-[#0F172A]">{formatNumber(src.totalReports)}</strong>{' '}
-                      <span className="font-sans text-[#64748B]">reports</span>
-                    </span>
-                    <span>
-                      <strong className="text-[#15803D]">
-                        {formatNumber(src.verifiedReports)}
-                      </strong>{' '}
-                      <span className="font-sans text-[#64748B]">verified</span>
-                    </span>
-                    <span>
-                      <strong className="text-[#0F172A]">
-                        {formatNumber(src.totalRevisions)}
-                      </strong>{' '}
-                      <span className="font-sans text-[#64748B]">revisions</span>
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-4 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => onExploreSource(src.id)}
-                      className="inline-flex items-center gap-1 font-medium text-[#1E3A8A] hover:underline whitespace-nowrap cursor-pointer"
-                    >
-                      Filter records
-                      <ArrowRight className="h-3 w-3" />
-                    </button>
-
-                    {isOwner && (
+                    <div className="flex items-center gap-4 shrink-0">
                       <button
                         type="button"
-                        onClick={() => {
-                          setDeleteError(null);
-                          setSourceToDelete(src);
-                        }}
-                        className="inline-flex items-center gap-1 font-medium text-[#64748B] transition-colors hover:text-[#B91C1C] whitespace-nowrap cursor-pointer"
+                        onClick={() => onExploreSource(src.id)}
+                        className="inline-flex items-center gap-1 font-medium text-[#1E3A8A] hover:underline whitespace-nowrap cursor-pointer"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Remove
+                        Filter records
+                        <ArrowRight className="h-3 w-3" />
                       </button>
-                    )}
+
+                      {isOwner && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(src)}
+                            className="inline-flex items-center gap-1 font-medium text-[#475569] transition-colors hover:text-[#1E3A8A] whitespace-nowrap cursor-pointer"
+                          >
+                            <PenLine className="h-3.5 w-3.5" />
+                            Edit
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setSourceToDelete(src);
+                            }}
+                            className="inline-flex items-center gap-1 font-medium text-[#64748B] transition-colors hover:text-[#B91C1C] whitespace-nowrap cursor-pointer"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Remove
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </article>
-            ))}
+                </article>
+              );
+            })}
       </div>
 
-      {/* Register Source Modal */}
+      {/* Register / Edit Source Modal */}
       {modalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-[#0F172A]/35 p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="Register Publishing Source"
+          aria-label={editingSource ? 'Edit Publishing Source' : 'Register Publishing Source'}
           onClick={() => setModalOpen(false)}
         >
           <div
@@ -289,7 +440,7 @@ export function SourcesDirectoryView({
           >
             <div className="flex items-center justify-between border-b border-[#E2E8F0] px-6 py-4">
               <h2 className="font-serif text-lg font-semibold text-[#0F172A]">
-                Register Publishing Source
+                {editingSource ? `Edit Source — ${editingSource.name}` : 'Register Publishing Source'}
               </h2>
               <button
                 type="button"
@@ -433,7 +584,13 @@ export function SourcesDirectoryView({
                     disabled={saving}
                     className="rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] disabled:opacity-50 cursor-pointer"
                   >
-                    {saving ? 'Registering...' : 'Register Source'}
+                    {saving
+                      ? editingSource
+                        ? 'Saving...'
+                        : 'Registering...'
+                      : editingSource
+                        ? 'Save Source Changes'
+                        : 'Register Source'}
                   </button>
                 </div>
               </form>

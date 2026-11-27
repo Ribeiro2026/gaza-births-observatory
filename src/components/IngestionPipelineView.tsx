@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   Check,
@@ -10,9 +10,15 @@ import {
   Globe,
   LogIn,
   RefreshCw,
+  Upload,
   X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import {
+  downloadSampleStagingCsv,
+  parseStagingCsv,
+  SAMPLE_STAGING_CSV,
+} from '../lib/csv-import';
 import {
   cn,
   formatDateShort,
@@ -59,7 +65,7 @@ export function IngestionPipelineView({
   onInspectReport,
 }: IngestionPipelineViewProps) {
   const { isOwner, signIn, authFetch } = useAuth();
-  const [subTab, setSubTab] = useState<'queue' | 'extract' | 'template'>('queue');
+  const [subTab, setSubTab] = useState<'queue' | 'extract' | 'csv' | 'template'>('queue');
   const [queueFilter, setQueueFilter] = useState<'Needs Review' | 'Approved' | 'Rejected' | 'All'>(
     'Needs Review'
   );
@@ -74,7 +80,13 @@ export function IngestionPipelineView({
   const [extractResult, setExtractResult] = useState<string | null>(null);
   const [extractError, setExtractError] = useState<string | null>(null);
 
-  // Staging item inline edits & processing
+  // Bulk CSV Staging Import state
+  const [csvText, setCsvText] = useState('');
+  const [csvStagingBusy, setCsvStagingBusy] = useState(false);
+  const [csvImportError, setCsvImportError] = useState<string | null>(null);
+  const [csvImportResult, setCsvImportResult] = useState<string | null>(null);
+
+  // Staging item inline edits, batch selection & processing
   const [editingDrafts, setEditingDrafts] = useState<
     Record<
       number,
@@ -89,6 +101,8 @@ export function IngestionPipelineView({
     >
   >({});
   const [expandedJsonIds, setExpandedJsonIds] = useState<number[]>([]);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
   const [queueError, setQueueError] = useState<string | null>(null);
@@ -96,6 +110,11 @@ export function IngestionPipelineView({
   // Cron Template state
   const [templateCode, setTemplateCode] = useState<string>('');
   const [copiedTemplate, setCopiedTemplate] = useState(false);
+
+  const csvPreview = useMemo(
+    () => (csvText.trim() ? parseStagingCsv(csvText) : { rows: [], errors: [] }),
+    [csvText]
+  );
 
   useEffect(() => {
     if (subTab === 'template' && !templateCode && isOwner) {
@@ -139,7 +158,33 @@ export function IngestionPipelineView({
     queueFilter === 'All' ? true : item.reviewStatus === queueFilter
   );
 
+  const pendingInView = filteredQueue.filter((i) => i.reviewStatus === 'Needs Review');
   const pendingCount = stagingItems.filter((i) => i.reviewStatus === 'Needs Review').length;
+
+  // Keep selectedIds synced with still-pending visible items
+  useEffect(() => {
+    const validIds = new Set(
+      stagingItems.filter((i) => i.reviewStatus === 'Needs Review').map((i) => i.id)
+    );
+    setSelectedIds((prev) => prev.filter((id) => validIds.has(id)));
+  }, [stagingItems]);
+
+  const toggleSelectItem = (id: number) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const toggleSelectAllVisible = () => {
+    const visibleIds = pendingInView.map((i) => i.id);
+    const allSelected =
+      visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+    if (allSelected) {
+      setSelectedIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
+    } else {
+      setSelectedIds(Array.from(new Set([...selectedIds, ...visibleIds])));
+    }
+  };
 
   const handleRunExtraction = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -256,6 +301,101 @@ export function IngestionPipelineView({
     }
   };
 
+  const handleBatchAction = async (
+    action: 'approve' | 'reject',
+    confidenceStatus: ConfidenceStatus = 'Verified'
+  ) => {
+    if (selectedIds.length === 0) return;
+    setQueueError(null);
+    setQueueFeedback(null);
+    setBatchBusy(true);
+    try {
+      const res = await authFetch('/api/staging/batch-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: selectedIds,
+          action,
+          confidenceStatus,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Batch staging action failed.');
+      }
+
+      const skippedCount = Array.isArray(data.skipped) ? data.skipped.length : 0;
+      const skippedNote =
+        skippedCount > 0
+          ? ` (${skippedCount} skipped: ${data.skipped[0]?.reason || 'requires individual review'})`
+          : '';
+      setQueueFeedback(
+        action === 'approve'
+          ? `Batch approved ${data.succeededCount} staged ${
+              data.succeededCount === 1 ? 'record' : 'records'
+            } as ${confidenceStatus}.${skippedNote}`
+          : `Batch rejected ${data.succeededCount} staged ${
+              data.succeededCount === 1 ? 'record' : 'records'
+            }.${skippedNote}`
+      );
+      setSelectedIds([]);
+      onRefreshAll();
+    } catch (err: unknown) {
+      setQueueError(err instanceof Error ? err.message : 'Batch action failed.');
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const handleCsvFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setCsvText(typeof reader.result === 'string' ? reader.result : '');
+      setCsvImportError(null);
+      setCsvImportResult(null);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleStageBulkCsv = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (csvPreview.rows.length === 0) return;
+    setCsvImportError(null);
+    setCsvImportResult(null);
+    setCsvStagingBusy(true);
+    try {
+      const res = await authFetch('/api/staging/bulk-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: csvPreview.rows.map(({ lineNumber: _ln, ...rest }) => rest),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Bulk CSV staging failed.');
+      }
+      setCsvImportResult(
+        `Staged ${data.stagedCount} CSV ${
+          data.stagedCount === 1 ? 'row' : 'rows'
+        } into the Needs Review queue with automatic duplicate and revision classification.`
+      );
+      setCsvText('');
+      onRefreshAll();
+      setSubTab('queue');
+      setQueueFilter('Needs Review');
+      setQueueFeedback(
+        `Queued ${data.stagedCount} rows from Bulk CSV Import for review.`
+      );
+    } catch (err: unknown) {
+      setCsvImportError(err instanceof Error ? err.message : 'Bulk CSV staging failed.');
+    } finally {
+      setCsvStagingBusy(false);
+    }
+  };
+
   const handleCopyTemplate = async () => {
     if (!templateCode) return;
     await navigator.clipboard.writeText(templateCode);
@@ -326,6 +466,20 @@ export function IngestionPipelineView({
           <button
             type="button"
             role="tab"
+            aria-selected={subTab === 'csv'}
+            onClick={() => setSubTab('csv')}
+            className={cn(
+              'rounded px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
+              subTab === 'csv'
+                ? 'bg-white text-[#0F172A] shadow-xs'
+                : 'text-[#475569] hover:text-[#0F172A]'
+            )}
+          >
+            Bulk CSV Import
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={subTab === 'template'}
             onClick={() => setSubTab('template')}
             className={cn(
@@ -362,17 +516,72 @@ export function IngestionPipelineView({
               ))}
             </div>
 
-            {!isOwner && (
-              <button
-                type="button"
-                onClick={() => signIn()}
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
-              >
-                <LogIn className="h-3.5 w-3.5" />
-                Owner sign-in required to approve or reject items
-              </button>
-            )}
+            <div className="flex flex-wrap items-center gap-3">
+              {isOwner && pendingInView.length > 0 && (
+                <label className="inline-flex items-center gap-2 text-xs font-medium text-[#334155] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={
+                      pendingInView.length > 0 &&
+                      pendingInView.every((i) => selectedIds.includes(i.id))
+                    }
+                    onChange={toggleSelectAllVisible}
+                    className="h-3.5 w-3.5 rounded border-[#CBD5E1] accent-[#1E3A8A]"
+                  />
+                  Select all pending ({pendingInView.length})
+                </label>
+              )}
+
+              {!isOwner && (
+                <button
+                  type="button"
+                  onClick={() => signIn()}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#1E3A8A] hover:underline cursor-pointer"
+                >
+                  <LogIn className="h-3.5 w-3.5" />
+                  Owner sign-in required to approve or reject items
+                </button>
+              )}
+            </div>
           </div>
+
+          {/* Batch Approve / Reject Bar */}
+          {isOwner && selectedIds.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#BFDBFE] bg-[#EFF6FF] px-4 py-3 text-xs">
+              <div className="font-medium text-[#1E3A8A]">
+                <span className="font-mono tabular-nums">{selectedIds.length}</span> staged{' '}
+                {selectedIds.length === 1 ? 'candidate' : 'candidates'} selected
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={() => handleBatchAction('approve', 'Verified')}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-[#1E3A8A] px-3 py-1.5 font-medium text-white hover:bg-[#172D6B] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  {batchBusy ? 'Processing...' : `Approve Verified (${selectedIds.length})`}
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={() => handleBatchAction('reject')}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-[#FECACA] bg-white px-3 py-1.5 font-medium text-[#B91C1C] hover:bg-[#FEF2F2] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Reject Selected
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={() => setSelectedIds([])}
+                  className="px-2 py-1.5 font-medium text-[#475569] hover:text-[#0F172A] cursor-pointer"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
 
           {queueFeedback && (
             <div className="rounded-md border border-[#BBF7D0] bg-[#F0FDF4] px-4 py-2.5 text-xs text-[#166534]">
@@ -428,6 +637,15 @@ export function IngestionPipelineView({
                     {/* Top Metadata Line (Zero-Pill Editorial Format) */}
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] bg-[#FAFAFA] px-5 py-3 text-xs">
                       <div className="flex flex-wrap items-center gap-2">
+                        {isOwner && isPending && (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select staging candidate ${item.documentRef}`}
+                            checked={selectedIds.includes(item.id)}
+                            onChange={() => toggleSelectItem(item.id)}
+                            className="mr-1 h-3.5 w-3.5 rounded border-[#CBD5E1] accent-[#1E3A8A] cursor-pointer"
+                          />
+                        )}
                         <span
                           className={cn(
                             'font-semibold',
@@ -857,7 +1075,172 @@ export function IngestionPipelineView({
         </section>
       )}
 
-      {/* TAB 3: Downloadable Standalone Cron Worker Template */}
+      {/* TAB 3: Bulk CSV Staging Import */}
+      {subTab === 'csv' && (
+        <section className="rounded-lg border border-[#E2E8F0] bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] px-5 py-3.5">
+            <div>
+              <h2 className="font-serif text-base font-semibold text-[#0F172A]">
+                Bulk CSV Staging Import
+              </h2>
+              <p className="text-xs text-[#64748B]">
+                Upload or paste structured monthly/annual tables (up to 200 rows) to stage with
+                automatic source matching and duplicate/revision detection.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setCsvText(SAMPLE_STAGING_CSV);
+                  setCsvImportError(null);
+                }}
+                className="rounded-md border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#334155] hover:bg-[#F8FAFC] whitespace-nowrap cursor-pointer"
+              >
+                Load Sample CSV
+              </button>
+              <button
+                type="button"
+                onClick={downloadSampleStagingCsv}
+                className="inline-flex items-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#1E3A8A] hover:bg-[#F8FAFC] whitespace-nowrap cursor-pointer"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download Template
+              </button>
+            </div>
+          </div>
+
+          <form onSubmit={handleStageBulkCsv} className="space-y-4 p-5">
+            {csvImportError && (
+              <div className="rounded-md border border-[#FECACA] bg-[#FEF2F2] px-4 py-2.5 text-xs text-[#991B1B]">
+                {csvImportError}
+              </div>
+            )}
+            {csvImportResult && (
+              <div className="rounded-md border border-[#BBF7D0] bg-[#F0FDF4] px-4 py-2.5 text-xs text-[#166534]">
+                {csvImportResult}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="inline-flex items-center gap-2 rounded-md border border-[#CBD5E1] bg-[#FAFAFA] px-3.5 py-2 text-xs font-medium text-[#0F172A] hover:bg-[#F1F5F9] cursor-pointer">
+                <Upload className="h-3.5 w-3.5 text-[#1E3A8A]" />
+                <span>Choose .csv file</span>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={handleCsvFileUpload}
+                  className="sr-only"
+                />
+              </label>
+              <span className="font-mono text-[11px] text-[#64748B]">
+                Required columns: source_name, period_value, count · Optional: period_type,
+                publication_date, document_ref, source_url, snippet
+              </span>
+            </div>
+
+            <textarea
+              rows={7}
+              value={csvText}
+              onChange={(e) => {
+                setCsvText(e.target.value);
+                setCsvImportError(null);
+              }}
+              placeholder={SAMPLE_STAGING_CSV}
+              className="w-full rounded-md border border-[#CBD5E1] bg-white p-3 font-mono text-xs leading-relaxed text-[#0F172A] placeholder:text-[#94A3B8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1E3A8A]/40"
+            />
+
+            {csvPreview.errors.length > 0 && (
+              <div className="rounded-md border border-[#FDE68A] bg-[#FFFBEB] px-4 py-3 text-xs text-[#92400E]">
+                <div className="font-medium">
+                  Validation warnings ({csvPreview.errors.length}):
+                </div>
+                <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                  {csvPreview.errors.slice(0, 6).map((err, i) => (
+                    <li key={i}>{err}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {csvPreview.rows.length > 0 && (
+              <div className="overflow-x-auto rounded-md border border-[#E2E8F0]">
+                <table className="w-full border-collapse text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E2E8F0] bg-[#FAFAFA] text-[#475569]">
+                      <th className="px-3 py-2 font-medium">Source</th>
+                      <th className="px-3 py-2 font-medium">Period</th>
+                      <th className="px-3 py-2 text-right font-medium">Births</th>
+                      <th className="px-3 py-2 font-medium">Document Ref</th>
+                      <th className="px-3 py-2 font-medium">Published</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9]">
+                    {csvPreview.rows.slice(0, 12).map((row) => {
+                      const matched = sources.find(
+                        (s) =>
+                          s.name.toLowerCase() === row.sourceNameDetected.toLowerCase() ||
+                          row.sourceNameDetected.toLowerCase().includes(s.name.toLowerCase())
+                      );
+                      return (
+                        <tr key={row.lineNumber}>
+                          <td className="px-3 py-2">
+                            <span className="font-medium text-[#0F172A]">
+                              {row.sourceNameDetected}
+                            </span>
+                            {!matched && (
+                              <span className="ml-1.5 text-[11px] text-[#B45309]">
+                                (unmatched — assign in queue)
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-[#334155]">
+                            {row.periodValue} ({row.periodType})
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono font-semibold tabular-nums text-[#0F172A]">
+                            {formatNumber(row.extractedCount)}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-[#475569]">
+                            {row.documentRef}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-[#64748B]">
+                            {row.publicationDate}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {csvPreview.rows.length > 12 && (
+                  <div className="border-t border-[#E2E8F0] bg-[#FAFAFA] px-3 py-2 text-[11px] text-[#64748B]">
+                    Showing first 12 of {csvPreview.rows.length} valid rows ready to stage.
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between border-t border-[#E2E8F0] pt-4">
+              <p className="text-xs text-[#64748B]">
+                All imported rows enter the Needs Review staging queue before touching live charts.
+              </p>
+              <button
+                type="submit"
+                disabled={csvStagingBusy || csvPreview.rows.length === 0}
+                className="inline-flex items-center gap-2 rounded-md bg-[#1E3A8A] px-4 py-2 text-xs font-medium text-white hover:bg-[#172D6B] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                {csvStagingBusy
+                  ? 'Staging CSV Rows...'
+                  : `Stage ${csvPreview.rows.length} Valid ${
+                      csvPreview.rows.length === 1 ? 'Row' : 'Rows'
+                    }`}
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
+
+      {/* TAB 4: Downloadable Standalone Cron Worker Template */}
       {subTab === 'template' && (
         <section className="rounded-lg border border-[#E2E8F0] bg-white">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2E8F0] px-5 py-3.5">

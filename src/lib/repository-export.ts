@@ -139,3 +139,65 @@ export function exportFullRepositoryToCsv(
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
+
+export function exportFilteredReportsToCsv(
+  filteredReports: BirthReportRecord[],
+  sources: SourceRecord[],
+  revisions: RevisionLogRecord[]
+): void {
+  const filename = `gaza-births-filtered-${filteredReports.length}rows-${new Date()
+    .toISOString()
+    .slice(0, 10)}.csv`;
+  exportFullRepositoryToCsv(filteredReports, sources, revisions, filename);
+}
+
+export function exportFilteredReportsToJson(
+  filteredReports: BirthReportRecord[],
+  sources: SourceRecord[],
+  activeFilters: Record<string, string>
+): void {
+  const sourceById = new Map<number, SourceRecord>(sources.map((s) => [s.id, s]));
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    observatory: 'Gaza Births Observatory',
+    recordCount: filteredReports.length,
+    filters: activeFilters,
+    records: filteredReports.map((r) => ({
+      reportId: r.id,
+      periodType: r.periodType,
+      periodValue: r.periodValue,
+      periodLabel: formatPeriodLabel(r.periodValue),
+      birthCount: r.count,
+      confidenceStatus: r.confidenceStatus,
+      source: {
+        id: r.sourceId,
+        name: r.sourceName,
+        type: r.sourceType,
+        credibilityTier: r.sourceCredibilityTier,
+        urlOrHandle: sourceById.get(r.sourceId)?.urlOrHandle || r.sourceHandle,
+      },
+      publicationDate: formatIsoDate(r.publicationDate),
+      documentRef: r.documentRef,
+      sourceUrl: r.sourceUrl,
+      revisionCount: r.revisionCount,
+      rawTextSnippet: r.rawTextSnippet,
+      archivedAt: formatIsoTimestamp(r.archivedAt),
+      updatedAt: formatIsoTimestamp(r.updatedAt),
+    })),
+  };
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: 'application/json;charset=utf-8;',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `gaza-births-filtered-${filteredReports.length}rows-${new Date()
+    .toISOString()
+    .slice(0, 10)}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+

@@ -24,25 +24,31 @@ import { ManualReportModal } from './components/ManualReportModal';
 import { SourceInspectorDrawer } from './components/SourceInspectorDrawer';
 import { SourcesDirectoryView } from './components/SourcesDirectoryView';
 import { useAuth } from './context/AuthContext';
+import {
+  CURATED_CONTEXT_MARKERS,
+  mergeContextMarkers,
+  type DbContextMarkerRow,
+} from './lib/context-markers';
 import { analyzeDiscrepancies } from './lib/discrepancy-engine';
 import { exportFullRepositoryToCsv } from './lib/repository-export';
+import {
+  getShareableObservatoryUrl,
+  readObservatoryUrlState,
+  syncObservatoryUrlState,
+  type AnalyticsUrlState,
+  type ExplorerUrlState,
+  type ObservatoryTab,
+} from './lib/url-state';
 import { cn } from './lib/utils';
 import type {
   BirthReportRecord,
+  ContextMarkerRecord,
   RevisionLogRecord,
   SourceRecord,
   StagingRecord,
 } from './types/observatory';
 
-type ActiveTab =
-  | 'analytics'
-  | 'heatmaps'
-  | 'discrepancies'
-  | 'explorer'
-  | 'ingestion'
-  | 'sources';
-
-const TAB_LABELS: Record<ActiveTab, string> = {
+const TAB_LABELS: Record<ObservatoryTab, string> = {
   analytics: 'Analytics & Discrepancies',
   heatmaps: 'Heatmaps & Matrices',
   discrepancies: 'Discrepancy Report',
@@ -63,13 +69,24 @@ export default function App() {
     signOut,
     authFetch,
   } = useAuth();
-  const [activeTab, setActiveTab] = useState<ActiveTab>('analytics');
+
+  const initialUrlState = useMemo(() => readObservatoryUrlState(), []);
+  const [activeTab, setActiveTab] = useState<ObservatoryTab>(initialUrlState.tab);
+  const [analyticsUrlState, setAnalyticsUrlState] = useState<AnalyticsUrlState>(
+    initialUrlState.analytics
+  );
+  const [explorerUrlState, setExplorerUrlState] = useState<ExplorerUrlState>(
+    initialUrlState.explorer
+  );
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [reports, setReports] = useState<BirthReportRecord[]>([]);
   const [revisions, setRevisions] = useState<RevisionLogRecord[]>([]);
   const [stagingItems, setStagingItems] = useState<StagingRecord[]>([]);
+  const [contextMarkers, setContextMarkers] = useState<ContextMarkerRecord[]>(
+    CURATED_CONTEXT_MARKERS
+  );
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -91,13 +108,35 @@ export default function App() {
     };
   }, []);
 
+  // Keep browser URL query parameters synced with active tab and view filters
+  useEffect(() => {
+    syncObservatoryUrlState({
+      tab: activeTab,
+      analytics: analyticsUrlState,
+      explorer: explorerUrlState,
+    });
+  }, [activeTab, analyticsUrlState, explorerUrlState]);
+
+  const fetchContextMarkers = useCallback(async () => {
+    try {
+      const res = await fetch('/api/context-markers');
+      if (res.ok) {
+        const rows = (await res.json()) as DbContextMarkerRow[];
+        setContextMarkers(mergeContextMarkers(rows));
+      }
+    } catch {
+      // Keep curated/existing markers on transient network error
+    }
+  }, []);
+
   const fetchPublicData = useCallback(async () => {
     setLoadError(null);
     try {
-      const [srcRes, repRes, revRes] = await Promise.all([
+      const [srcRes, repRes, revRes, markersRes] = await Promise.all([
         fetch('/api/sources'),
         fetch('/api/reports'),
         fetch('/api/revisions'),
+        fetch('/api/context-markers').catch(() => null),
       ]);
 
       if (!srcRes.ok || !repRes.ok || !revRes.ok) {
@@ -113,6 +152,12 @@ export default function App() {
       setSources(srcData);
       setReports(repData);
       setRevisions(revData);
+
+      if (markersRes && markersRes.ok) {
+        const markerRows = (await markersRes.json()) as DbContextMarkerRow[];
+        setContextMarkers(mergeContextMarkers(markerRows));
+      }
+
       setInspectorRefreshNonce((n) => n + 1);
     } catch (err: unknown) {
       setLoadError(
@@ -154,13 +199,13 @@ export default function App() {
   useEffect(() => {
     if (isOwner) {
       fetchStagingData();
-    } else {
+    } else if (!authLoading) {
       setStagingItems([]);
       setModalOpen(false);
       setEditingReport(null);
       setActiveTab((current) => (current === 'ingestion' ? 'analytics' : current));
     }
-  }, [isOwner, fetchStagingData]);
+  }, [isOwner, authLoading, fetchStagingData]);
 
   const pendingStagingCount = isOwner
     ? stagingItems.filter((s) => s.reviewStatus === 'Needs Review').length
@@ -196,6 +241,19 @@ export default function App() {
     setActiveTab('explorer');
   };
 
+  const handleCopyViewLink = useCallback(() => {
+    const shareUrl = getShareableObservatoryUrl({
+      tab: activeTab,
+      analytics: analyticsUrlState,
+      explorer: explorerUrlState,
+    });
+    if (shareUrl && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(shareUrl).catch(() => {
+        // Clipboard permission denied in sandboxed iframe
+      });
+    }
+  }, [activeTab, analyticsUrlState, explorerUrlState]);
+
   const handleExportRepository = () => {
     if (reports.length === 0) return;
     exportFullRepositoryToCsv(reports, sources, revisions);
@@ -225,7 +283,7 @@ export default function App() {
   );
 
   const navItems: Array<{
-    id: ActiveTab;
+    id: ObservatoryTab;
     label: string;
     icon: React.ComponentType<{ className?: string }>;
     meta?: string;
@@ -502,9 +560,14 @@ export default function App() {
               sources={sources}
               reports={reports}
               revisions={revisions}
+              contextMarkers={contextMarkers}
               pendingStagingCount={pendingStagingCount}
               isOwner={isOwner}
               loading={loading}
+              initialUrlState={analyticsUrlState}
+              onAnalyticsStateChange={setAnalyticsUrlState}
+              onCopyViewLink={handleCopyViewLink}
+              onRefreshContextMarkers={fetchContextMarkers}
               onInspectReport={(id) => setInspectedReportId(id)}
               onNavigateTab={(tab) => {
                 if (tab === 'ingestion' && !isOwner) return;
@@ -558,11 +621,15 @@ export default function App() {
             <DataExplorerView
               reports={reports}
               sources={sources}
+              revisions={revisions}
               isOwner={isOwner}
               loading={loading}
+              initialUrlState={explorerUrlState}
               initialSourceId={explorerSourceFilter}
               initialSearchQuery={explorerSearchQuery}
               searchSyncNonce={explorerSearchNonce}
+              onFiltersChange={setExplorerUrlState}
+              onCopyViewLink={handleCopyViewLink}
               onClearInitialSource={() => setExplorerSourceFilter(null)}
               onClearInitialSearch={() => setExplorerSearchQuery('')}
               onInspectReport={(id) => setInspectedReportId(id)}
@@ -584,6 +651,7 @@ export default function App() {
           {activeTab === 'sources' && (
             <SourcesDirectoryView
               sources={sources}
+              reports={reports}
               isOwner={isOwner}
               loading={loading}
               onRefreshAll={fetchAllData}

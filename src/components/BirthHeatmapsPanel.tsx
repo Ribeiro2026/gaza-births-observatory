@@ -7,7 +7,20 @@ import {
   formatPeriodLabel,
   getStatusTextClass,
 } from '../lib/utils';
-import type { BirthReportRecord, SourceRecord } from '../types/observatory';
+import type {
+  BirthReportRecord,
+  CredibilityTier,
+  SourceRecord,
+} from '../types/observatory';
+
+type HeatmapTierScope = 'ALL' | CredibilityTier;
+
+const TIER_FILTER_OPTIONS: Array<{ value: HeatmapTierScope; label: string }> = [
+  { value: 'Tier 1 - Primary Registry', label: 'Tier 1 Only' },
+  { value: 'ALL', label: 'All Tiers' },
+  { value: 'Tier 2 - Multilateral', label: 'Tier 2' },
+  { value: 'Tier 3 - Media / Secondary', label: 'Tier 3' },
+];
 
 interface BirthHeatmapsPanelProps {
   sources: SourceRecord[];
@@ -84,6 +97,7 @@ export function BirthHeatmapsPanel({
   onInspectReport,
 }: BirthHeatmapsPanelProps) {
   const [viewMode, setViewMode] = useState<'calendar' | 'matrix'>(initialMode);
+  const [tierFilter, setTierFilter] = useState<HeatmapTierScope>('Tier 1 - Primary Registry');
   const [calendarMetric, setCalendarMetric] = useState<'volume' | 'discrepancy'>('volume');
   const [calendarSourceId, setCalendarSourceId] = useState<string>('ALL');
   const [matrixMetric, setMatrixMetric] = useState<'deviation' | 'volume'>('deviation');
@@ -96,14 +110,34 @@ export function BirthHeatmapsPanel({
     rows: Array<{ label: string; value: string; status?: string }>;
   } | null>(null);
 
-  // Monthly active reports (exclude Superseded by default for crisp statistical heatmaps)
-  const monthlyReports = useMemo(
+  const scopedSources = useMemo(
     () =>
-      reports.filter(
-        (r) => r.periodType === 'Monthly' && r.confidenceStatus !== 'Superseded'
-      ),
-    [reports]
+      tierFilter === 'ALL'
+        ? sources
+        : sources.filter((s) => s.credibilityTier === tierFilter),
+    [sources, tierFilter]
   );
+
+  // Reset selected individual source if switching tier removes it
+  React.useEffect(() => {
+    if (
+      calendarSourceId !== 'ALL' &&
+      !scopedSources.some((s) => String(s.id) === calendarSourceId)
+    ) {
+      setCalendarSourceId('ALL');
+    }
+  }, [scopedSources, calendarSourceId]);
+
+  // Monthly active reports scoped by tier (exclude Superseded for crisp statistical heatmaps)
+  const monthlyReports = useMemo(() => {
+    const allowedSourceIds = new Set(scopedSources.map((s) => s.id));
+    return reports.filter(
+      (r) =>
+        r.periodType === 'Monthly' &&
+        r.confidenceStatus !== 'Superseded' &&
+        allowedSourceIds.has(r.sourceId)
+    );
+  }, [reports, scopedSources]);
 
   const availableYears = useMemo(() => {
     const yrs = new Set(monthlyReports.map((r) => r.periodValue.slice(0, 4)));
@@ -214,7 +248,7 @@ export function BirthHeatmapsPanel({
       allCounts.push(r.count);
     }
 
-    const activeSources = sources.filter((s) =>
+    const activeSources = scopedSources.filter((s) =>
       periods.some((p) => lookup.has(`${s.id}:${p}`))
     );
 
@@ -222,7 +256,7 @@ export function BirthHeatmapsPanel({
     const maxVol = allCounts.length ? Math.max(...allCounts) : 5600;
 
     return { periods, periodMedians, lookup, activeSources, minVol, maxVol };
-  }, [monthlyReports, sources, matrixYear]);
+  }, [monthlyReports, scopedSources, matrixYear]);
 
   const handleExportPng = async () => {
     setExporting(true);
@@ -274,7 +308,9 @@ export function BirthHeatmapsPanel({
             calendarMetric === 'volume'
               ? 'Year-by-month intensity view of reported live births (excluding superseded figures)'
               : 'Percentage divergence between lowest and highest reporting source each month',
-          activeFiltersLabel: `Calendar Heatmap · Source: ${sourceName} · Metric: ${
+          activeFiltersLabel: `Calendar Heatmap · Tier: ${
+            tierFilter === 'ALL' ? 'All Tiers' : tierFilter
+          } · Source: ${sourceName} · Metric: ${
             calendarMetric === 'volume' ? 'Monthly Volume' : 'Cross-Source Spread %'
           }`,
           rowLabels: availableYears,
@@ -340,7 +376,9 @@ export function BirthHeatmapsPanel({
             matrixMetric === 'deviation'
               ? 'How each publisher deviates above or below the multi-source monthly median'
               : 'Monthly reported live births plotted by publishing registry and agency',
-          activeFiltersLabel: `Source Matrix · Scope: ${
+          activeFiltersLabel: `Source Matrix · Tier: ${
+            tierFilter === 'ALL' ? 'All Tiers' : tierFilter
+          } · Scope: ${
             matrixYear === 'All' ? 'Recent 14 Months' : `Year ${matrixYear}`
           } · Metric: ${matrixMetric === 'deviation' ? 'Consensus Deviation %' : 'Absolute Volume'}`,
           rowLabels: matrixData.activeSources.map((s) => s.name),
@@ -439,8 +477,34 @@ export function BirthHeatmapsPanel({
           </div>
         </div>
 
-        {/* Right-side metric & scope selectors + PNG Export */}
+        {/* Right-side tier, metric & scope selectors + PNG Export */}
         <div className="flex flex-wrap items-center gap-2.5">
+          {/* Credibility Tier Filter (Defaults to Tier 1 Only) */}
+          <div
+            className="inline-flex items-center rounded-md bg-[#F1F5F9] p-0.5"
+            role="group"
+            aria-label="Heatmap credibility tier"
+          >
+            {TIER_FILTER_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => {
+                  setTierFilter(opt.value);
+                  setHoveredDetail(null);
+                }}
+                className={cn(
+                  'rounded px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
+                  tierFilter === opt.value
+                    ? 'bg-white text-[#1E3A8A] shadow-xs'
+                    : 'text-[#475569] hover:text-[#0F172A]'
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
           {viewMode === 'calendar' ? (
             <>
               <div className="inline-flex items-center rounded-md bg-[#F1F5F9] p-0.5">
@@ -480,8 +544,10 @@ export function BirthHeatmapsPanel({
                   onChange={(e) => setCalendarSourceId(e.target.value)}
                   className="rounded-md border border-[#CBD5E1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#0F172A]"
                 >
-                  <option value="ALL">All Sources (Median)</option>
-                  {sources.map((s) => (
+                  <option value="ALL">
+                    {tierFilter === 'ALL' ? 'All Sources (Median)' : 'Tier Median'}
+                  </option>
+                  {scopedSources.map((s) => (
                     <option key={s.id} value={String(s.id)}>
                       {s.name}
                     </option>

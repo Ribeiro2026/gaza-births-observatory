@@ -6,10 +6,14 @@ import { createServer as createViteServer } from 'vite';
 import { z } from 'zod';
 import {
   approveStagingItem,
+  batchActionStagingItems,
+  createContextMarker,
   createOrUpdateReport,
   createSource,
+  deleteContextMarker,
   deleteSource,
   getReportWithRevisions,
+  listContextMarkers,
   listRecentRevisions,
   listReports,
   listSources,
@@ -17,6 +21,7 @@ import {
   overrideReportById,
   rejectStagingItem,
   stageExtractedRecords,
+  updateSource,
 } from './src/db/repository.ts';
 import { AuthRequest, requireOwnerAuth } from './src/middleware/auth.ts';
 import {
@@ -109,6 +114,46 @@ const approveStagingSchema = z.object({
   changeReason: z.string().max(500).optional(),
 });
 
+const bulkCsvRowSchema = z.object({
+  sourceNameDetected: z.string().min(2).max(120),
+  periodType: z.enum(['Monthly', 'Yearly']),
+  periodValue: z.string().regex(/^(\d{4}|\d{4}-(0[1-9]|1[0-2]))$/),
+  extractedCount: z.coerce.number().int().min(1).max(500000),
+  publicationDate: z.string().min(4).max(40),
+  sourceUrl: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v && v.trim() && isHttpUrl(v.trim())
+        ? v.trim()
+        : 'https://archive.observatory.local/csv-import'
+    ),
+  rawTextSnippet: z.string().min(3).max(3000),
+  documentRef: z.string().min(2).max(160),
+});
+
+const bulkCsvImportSchema = z.object({
+  rows: z.array(bulkCsvRowSchema).min(1).max(200),
+});
+
+const batchStagingActionSchema = z.object({
+  ids: z.array(z.coerce.number().int().positive()).min(1).max(100),
+  action: z.enum(['approve', 'reject']),
+  confidenceStatus: z
+    .enum(['Pending Review', 'Verified', 'Disputed', 'Superseded'])
+    .optional(),
+  changeReason: z.string().max(500).optional(),
+});
+
+const createContextMarkerSchema = z.object({
+  periodValue: z
+    .string()
+    .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use YYYY-MM monthly period format'),
+  title: z.string().min(2).max(80),
+  category: z.enum(['Disruption', 'Methodology', 'Reporting Shift', 'Milestone']),
+  notes: z.string().max(400).optional(),
+});
+
 function parseDateSafe(input: string): Date {
   const parsed = new Date(input);
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
@@ -154,6 +199,29 @@ async function startServer() {
       return res.status(201).json(created);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to create source';
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  app.patch('/api/sources/:id', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
+    const sourceId = Number(req.params.id);
+    if (!Number.isInteger(sourceId) || sourceId <= 0) {
+      return res.status(400).json({ error: 'Invalid source identifier.' });
+    }
+    const parsed = createSourceSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid source update payload.',
+      });
+    }
+    try {
+      const updated = await updateSource(sourceId, parsed.data);
+      if (!updated) {
+        return res.status(404).json({ error: 'Source not found.' });
+      }
+      return res.json(updated);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to update source';
       return res.status(500).json({ error: message });
     }
   });
@@ -439,6 +507,115 @@ async function startServer() {
       return res.status(500).json({ error: message });
     }
   });
+
+  app.post('/api/staging/bulk-csv', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
+    const parsed = bulkCsvImportSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid CSV staging payload.',
+      });
+    }
+    try {
+      const stagedItems = await stageExtractedRecords(
+        parsed.data.rows.map((row) => ({
+          sourceNameDetected: row.sourceNameDetected,
+          periodType: row.periodType,
+          periodValue: row.periodValue,
+          extractedCount: row.extractedCount,
+          publicationDate: parseDateSafe(row.publicationDate),
+          sourceUrl: row.sourceUrl,
+          rawTextSnippet: row.rawTextSnippet,
+          documentRef: row.documentRef,
+          rawExtractionJson: JSON.stringify({ importType: 'bulk-csv', ...row }, null, 2),
+        }))
+      );
+      return res.status(201).json({
+        stagedCount: stagedItems.length,
+        stagedItems,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Bulk CSV staging failed.';
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  app.post(
+    '/api/staging/batch-action',
+    requireOwnerAuth,
+    async (req: AuthRequest, res: Response) => {
+      const parsed = batchStagingActionSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: parsed.error.issues[0]?.message || 'Invalid batch staging payload.',
+        });
+      }
+      try {
+        const result = await batchActionStagingItems({
+          ...parsed.data,
+          actorEmail: req.user?.email ?? null,
+        });
+        return res.json(result);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Batch staging action failed.';
+        return res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  // Historical Context Markers (Public Read, Owner Write)
+  app.get('/api/context-markers', async (_req: Request, res: Response) => {
+    try {
+      const data = await listContextMarkers();
+      return res.json(data);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to load context markers.';
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/context-markers', requireOwnerAuth, async (req: AuthRequest, res: Response) => {
+    const parsed = createContextMarkerSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: parsed.error.issues[0]?.message || 'Invalid context marker payload.',
+      });
+    }
+    try {
+      const created = await createContextMarker({
+        ...parsed.data,
+        createdByEmail: req.user?.email ?? null,
+      });
+      return res.status(201).json(created);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to create context marker.';
+      return res.status(500).json({ error: message });
+    }
+  });
+
+  app.delete(
+    '/api/context-markers/:id',
+    requireOwnerAuth,
+    async (req: AuthRequest, res: Response) => {
+      const markerId = Number(req.params.id);
+      if (!Number.isInteger(markerId) || markerId <= 0) {
+        return res.status(400).json({ error: 'Invalid context marker identifier.' });
+      }
+      try {
+        const deleted = await deleteContextMarker(markerId);
+        if (!deleted) {
+          return res.status(404).json({ error: 'Context marker not found.' });
+        }
+        return res.json({ deleted });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to delete context marker.';
+        return res.status(500).json({ error: message });
+      }
+    }
+  );
 
   app.get('/api/ingest/template', requireOwnerAuth, (_req: AuthRequest, res: Response) => {
     res.json({

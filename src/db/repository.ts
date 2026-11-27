@@ -1,7 +1,8 @@
-import { and, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   birthReports,
+  contextMarkers,
   dataRevisionLogs,
   ingestionStaging,
   sources,
@@ -82,6 +83,41 @@ export async function createSource(input: {
   } catch (error) {
     console.error('Database insert failed (createSource):', error);
     throw new Error('Could not register source. Ensure the source name is unique.', {
+      cause: error,
+    });
+  }
+}
+
+export async function updateSource(
+  sourceId: number,
+  input: {
+    name: string;
+    type: string;
+    urlOrHandle: string;
+    credibilityTier: string;
+    description?: string;
+    seriesColor?: string;
+  }
+) {
+  try {
+    await ensureSeeded();
+    const [updated] = await db
+      .update(sources)
+      .set({
+        name: input.name.trim(),
+        type: input.type,
+        urlOrHandle: input.urlOrHandle.trim(),
+        credibilityTier: input.credibilityTier,
+        description: input.description?.trim() ?? '',
+        seriesColor: input.seriesColor || '#0369A1',
+      })
+      .where(eq(sources.id, sourceId))
+      .returning();
+
+    return updated ?? null;
+  } catch (error) {
+    console.error('Database update failed (updateSource):', error);
+    throw new Error('Could not update source. Ensure the source name is unique.', {
       cause: error,
     });
   }
@@ -667,3 +703,128 @@ export async function rejectStagingItem(stagingId: number) {
     throw new Error('Failed to reject staging item.', { cause: error });
   }
 }
+
+export async function batchActionStagingItems(input: {
+  ids: number[];
+  action: 'approve' | 'reject';
+  confidenceStatus?: 'Verified' | 'Disputed' | 'Pending Review' | 'Superseded';
+  changeReason?: string;
+  actorEmail?: string | null;
+}) {
+  try {
+    await ensureSeeded();
+    const succeeded: number[] = [];
+    const skipped: Array<{ id: number; reason: string }> = [];
+
+    for (const stagingId of input.ids) {
+      const rows = await db
+        .select()
+        .from(ingestionStaging)
+        .where(eq(ingestionStaging.id, stagingId))
+        .limit(1);
+
+      if (rows.length === 0) {
+        skipped.push({ id: stagingId, reason: 'Staging item not found.' });
+        continue;
+      }
+
+      const item = rows[0];
+      if (item.reviewStatus !== 'Needs Review') {
+        skipped.push({ id: stagingId, reason: `Already ${item.reviewStatus}.` });
+        continue;
+      }
+
+      if (input.action === 'reject') {
+        await rejectStagingItem(stagingId);
+        succeeded.push(stagingId);
+        continue;
+      }
+
+      if (!item.matchedSourceId) {
+        skipped.push({
+          id: stagingId,
+          reason: `Unmatched source "${item.sourceNameDetected}" — assign a source individually before approving.`,
+        });
+        continue;
+      }
+
+      await approveStagingItem(stagingId, {
+        sourceId: item.matchedSourceId,
+        periodType: item.periodType as 'Monthly' | 'Yearly',
+        periodValue: item.periodValue,
+        count: item.extractedCount,
+        confidenceStatus: input.confidenceStatus || 'Verified',
+        changeReason:
+          input.changeReason?.trim() ||
+          `Batch approved from ingestion queue (${item.documentRef}).`,
+        actorEmail: input.actorEmail ?? null,
+      });
+      succeeded.push(stagingId);
+    }
+
+    return {
+      action: input.action,
+      succeededCount: succeeded.length,
+      succeededIds: succeeded,
+      skipped,
+    };
+  } catch (error) {
+    console.error('Database batch action failed (batchActionStagingItems):', error);
+    throw new Error('Failed to process batch staging action.', { cause: error });
+  }
+}
+
+export async function listContextMarkers() {
+  try {
+    await ensureSeeded();
+    const rows = await db
+      .select()
+      .from(contextMarkers)
+      .orderBy(asc(contextMarkers.periodValue), asc(contextMarkers.id));
+    return rows;
+  } catch (error) {
+    console.error('Database query failed (listContextMarkers):', error);
+    throw new Error('Failed to load context markers.', { cause: error });
+  }
+}
+
+export async function createContextMarker(input: {
+  periodValue: string;
+  title: string;
+  category: string;
+  notes?: string;
+  createdByEmail?: string | null;
+}) {
+  try {
+    await ensureSeeded();
+    const [created] = await db
+      .insert(contextMarkers)
+      .values({
+        periodValue: input.periodValue.trim(),
+        title: input.title.trim(),
+        category: input.category,
+        notes: input.notes?.trim() || '',
+        createdByEmail: input.createdByEmail ?? null,
+      })
+      .returning();
+    return created;
+  } catch (error) {
+    console.error('Database insert failed (createContextMarker):', error);
+    throw new Error('Failed to save context marker.', { cause: error });
+  }
+}
+
+export async function deleteContextMarker(markerId: number) {
+  try {
+    await ensureSeeded();
+    const deleted = await db
+      .delete(contextMarkers)
+      .where(eq(contextMarkers.id, markerId))
+      .returning();
+    return deleted[0] ?? null;
+  } catch (error) {
+    console.error('Database delete failed (deleteContextMarker):', error);
+    throw new Error('Failed to delete context marker.', { cause: error });
+  }
+}
+

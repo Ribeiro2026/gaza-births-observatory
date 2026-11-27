@@ -1,11 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
+  Check,
+  Copy,
   ExternalLink,
   History,
   PenLine,
+  Quote,
   X,
 } from 'lucide-react';
+import { formatReportCitation, type CitationFormat } from '../lib/citations';
 import {
   cn,
   formatDateShort,
@@ -37,6 +41,24 @@ export function SourceInspectorDrawer({
   const [detail, setDetail] = useState<ReportDetailRecord | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [citationFormat, setCitationFormat] = useState<CitationFormat>('apa');
+  const [citationCopied, setCitationCopied] = useState(false);
+
+  const formattedCitation = useMemo(
+    () => (detail ? formatReportCitation(detail, citationFormat) : ''),
+    [detail, citationFormat]
+  );
+
+  const handleCopyCitation = async () => {
+    if (!formattedCitation) return;
+    try {
+      await navigator.clipboard.writeText(formattedCitation);
+      setCitationCopied(true);
+      setTimeout(() => setCitationCopied(false), 2200);
+    } catch {
+      // Clipboard API unavailable in restricted context
+    }
+  };
 
   useEffect(() => {
     if (!reportId) {
@@ -206,6 +228,76 @@ export function SourceInspectorDrawer({
                     </dd>
                   </div>
                 </dl>
+              </div>
+
+              {/* Citation Generator (APA / Chicago / BibTeX) */}
+              <div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0F172A]">
+                    <Quote className="h-3.5 w-3.5 text-[#1E3A8A]" />
+                    Cite This Record
+                  </h3>
+                  <div
+                    className="inline-flex items-center rounded-md bg-[#F1F5F9] p-0.5"
+                    role="group"
+                    aria-label="Citation format"
+                  >
+                    {(
+                      [
+                        { id: 'apa', label: 'APA' },
+                        { id: 'chicago', label: 'Chicago' },
+                        { id: 'bibtex', label: 'BibTeX' },
+                      ] as const
+                    ).map((fmt) => (
+                      <button
+                        key={fmt.id}
+                        type="button"
+                        onClick={() => {
+                          setCitationFormat(fmt.id);
+                          setCitationCopied(false);
+                        }}
+                        className={cn(
+                          'rounded px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer',
+                          citationFormat === fmt.id
+                            ? 'bg-white text-[#0F172A] shadow-xs'
+                            : 'text-[#475569] hover:text-[#0F172A]'
+                        )}
+                      >
+                        {fmt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-2 rounded-md border border-[#E2E8F0] bg-[#FAFAFA] p-3">
+                  <pre
+                    className={cn(
+                      'whitespace-pre-wrap break-words text-xs leading-relaxed text-[#1E293B]',
+                      citationFormat === 'bibtex' ? 'font-mono text-[11px]' : 'font-sans'
+                    )}
+                  >
+                    {formattedCitation}
+                  </pre>
+                  <div className="mt-2.5 flex items-center justify-end border-t border-[#E2E8F0] pt-2">
+                    <button
+                      type="button"
+                      onClick={handleCopyCitation}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-[#CBD5E1] bg-white px-3 py-1.5 text-xs font-medium text-[#0F172A] transition-colors hover:bg-[#F8FAFC] whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      {citationCopied ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 text-[#15803D]" />
+                          Copied {citationFormat.toUpperCase()} Citation
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5 text-[#1E3A8A]" />
+                          Copy {citationFormat.toUpperCase()} Citation
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* Concurrent Sources for Same Period */}

@@ -79,6 +79,16 @@ export const ingestionStaging = pgTable('ingestion_staging', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const contextMarkers = pgTable('context_markers', {
+  id: serial('id').primaryKey(),
+  periodValue: text('period_value').notNull(), // 'YYYY-MM'
+  title: text('title').notNull(),
+  category: text('category').notNull().default('Reporting Shift'), // 'Disruption' | 'Methodology' | 'Reporting Shift' | 'Milestone'
+  notes: text('notes').notNull().default(''),
+  createdByEmail: text('created_by_email'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const sourcesRelations = relations(sources, ({ many }) => ({
   reports: many(birthReports),
   stagedItems: many(ingestionStaging),

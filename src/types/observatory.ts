@@ -100,3 +100,22 @@ export interface StagingRecord {
   relatedDocumentRef: string | null;
   relatedSourceId: number | null;
 }
+
+export type ContextMarkerCategory =
+  | 'Disruption'
+  | 'Methodology'
+  | 'Reporting Shift'
+  | 'Milestone';
+
+export interface ContextMarkerRecord {
+  id: string;
+  dbId?: number;
+  periodValue: string; // 'YYYY-MM'
+  title: string;
+  category: ContextMarkerCategory;
+  notes: string;
+  isBuiltIn: boolean;
+  createdByEmail?: string | null;
+  createdAt?: string;
+}
+
